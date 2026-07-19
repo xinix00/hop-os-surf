@@ -38,6 +38,18 @@ func TestRekenen(t *testing.T) {
 	}
 }
 
+func TestPendingOp(t *testing.T) {
+	var c Calc
+	press(&c, "12+")
+	if c.Op() != '+' {
+		t.Fatalf("Op() = %q, want +", c.Op())
+	}
+	press(&c, "34=")
+	if c.Op() != 0 {
+		t.Fatalf("Op() after = must clear, got %q", c.Op())
+	}
+}
+
 func TestHitEnKey(t *testing.T) {
 	b := image.Rect(0, 0, 240, 300)
 	_, btns := layout(b)

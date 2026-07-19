@@ -85,6 +85,10 @@ func (c *Calc) value() float64 {
 	return v
 }
 
+// Op is de openstaande operator (0 = geen) — de UI toont hem in het display
+// (Derek 19-07: "als je de x invult, laat die dan zien").
+func (c *Calc) Op() byte { return c.op }
+
 // Display is de displayregel: de invoer als er getypt wordt, anders het
 // resultaat; "err" na bv. delen door nul.
 func (c *Calc) Display() string {
@@ -182,12 +186,18 @@ func Render(img *image.RGBA, c *Calc, hover byte) {
 		scale = 1
 	}
 
-	// Displayregel: rechts uitgelijnd.
+	// Displayregel: getal rechts, de openstaande operator links (feedback
+	// dat de + of × "hangt" — zoals de klassiekers dat met een vlaggetje
+	// deden).
 	pixel.Fill(img, display, colDisplay)
 	pixel.Outline(img, display, colEdge)
 	txt := c.Display()
+	ty := display.Min.Y + (display.Dy()-8*scale)/2
 	tx := display.Max.X - 6 - pixel.StringWidth(txt, scale)
-	pixel.DrawString(img, tx, display.Min.Y+(display.Dy()-8*scale)/2, scale, colText, txt)
+	pixel.DrawString(img, tx, ty, scale, colText, txt)
+	if op := c.Op(); op != 0 {
+		pixel.DrawString(img, display.Min.X+6, ty, scale, colBtnOpHov, label(op))
+	}
 
 	for i, r := range btns {
 		drawButton(img, r, keyOf(i), hover, scale)

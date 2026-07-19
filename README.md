@@ -22,9 +22,11 @@ GUI code. Design dossier (the negotiated source of truth, Dutch):
 | `pixel/` | tiny shared drawing layer: the 8x8 font, fills, outlines |
 | `face/` | the demo clock face |
 | `calc/` | calculator logic + rendering (host-tested) |
+| `browse/` | browser layout + rendering on top of [gost-dom](https://github.com/gost-dom/browser) (host-tested) |
 | `cmd/display` | the display server app (SURF on :7878, HTTP on :80) |
 | `cmd/clock` | the demo app: an analog clock from anywhere in the cluster |
 | `cmd/calc` | the interactive demo: a calculator you operate through the web-KVM |
+| `cmd/browser` | a real web browser: gost-dom fetches + parses, `browse/` lays out on the 8x8 font — address bar, scrolling, clickable links (`SURF_HOME` = start page) |
 
 ## Build & test
 

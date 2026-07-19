@@ -339,7 +339,7 @@ type View struct {
 func (v *View) Render(img *image.RGBA) {
 	b := img.Bounds()
 	pixel.Fill(img, b, colPage)
-	v.renderBar(img)
+	v.RenderBar(img)
 	y0 := b.Min.Y + BarH
 	if v.Status != "" {
 		pixel.DrawString(img, b.Min.X+pad, y0+lead, 1, colErr, v.Status)
@@ -361,8 +361,9 @@ func (v *View) Render(img *image.RGBA) {
 	}
 }
 
-// renderBar tekent alléén de adresbalk (voor het tik-pad: partiële damage).
-func (v *View) renderBar(img *image.RGBA) {
+// RenderBar tekent alléén de adresbalk (voor het tik-pad: een strook van
+// een paar KB damage per toets in plaats van een vol frame).
+func (v *View) RenderBar(img *image.RGBA) {
 	b := img.Bounds()
 	bar := image.Rect(b.Min.X, b.Min.Y, b.Max.X, b.Min.Y+BarH)
 	pixel.Fill(img, bar, colBar)

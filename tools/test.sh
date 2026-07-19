@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 
 # De mains (cmd/*) kunnen niet op de host: applib is tamago-only. De
 # bibliotheek-packages wel — inclusief de end-to-end-keten in surfserve.
-go test "$@" ./surf ./pixel ./calc ./compositor ./surfserve ./window ./face
+go test "$@" ./surf ./pixel ./calc ./browse ./compositor ./surfserve ./window ./face
 
 TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"
 if [ ! -x "$TAMAGO" ]; then
@@ -17,14 +17,14 @@ if [ ! -x "$TAMAGO" ]; then
 fi
 mkdir -p out
 # Canonieke app-link (zie HopOS docs/app.md): één artifact voor elk slot.
-for app in display clock calc; do
+for app in display clock calc browser; do
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags linkcpuinit -trimpath \
 		-ldflags "-w -T 0x50010000 -R 0x1000" -o "out/$app.elf" "./cmd/$app"
 done
 # De lnetonet-variant moet blijven bouwen (opt-in netstack, zie HopOS).
-for app in display clock calc; do
+for app in display clock calc browser; do
 	GOWORK=off GOTOOLCHAIN=local GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=arm64 \
 		"$TAMAGO" build -tags "lnetonet linkcpuinit" -o /dev/null "./cmd/$app"
 done
-echo "OK: host-tests groen, out/{display,clock,calc}.elf gebouwd" >&2
+echo "OK: host-tests groen, out/{display,clock,calc,browser}.elf gebouwd" >&2
