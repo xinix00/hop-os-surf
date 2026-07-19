@@ -36,8 +36,6 @@ var (
 	colBorderFocus = color.RGBA{0x6E, 0xA8, 0xFF, 0xFF}
 	colBorderIdle  = color.RGBA{0x3A, 0x4A, 0x6A, 0xFF}
 	colText        = color.RGBA{0xF0, 0xF4, 0xFF, 0xFF}
-	colCursor      = color.RGBA{0xFF, 0xFF, 0xFF, 0xFF}
-	colCursorRim   = color.RGBA{0x00, 0x00, 0x00, 0xFF}
 )
 
 const margin = 8 // pixels tussen/rond windows
@@ -145,9 +143,6 @@ type Compositor struct {
 	pending  []image.Rectangle
 	frameLog map[uint64][]image.Rectangle
 	minGen   uint64
-
-	curX, curY int
-	curOn      bool
 }
 
 // New maakt een compositor voor een scherm van w×h pixels.
@@ -267,14 +262,38 @@ func (c *Compositor) Relayout() {
 }
 
 // Present flipt back→front voor deze surface en markeert het scherm vuil.
-func (c *Compositor) Present(s *Surface) {
+func (c *Compositor) Present(s *Surface) { c.PresentRects(s, nil) }
+
+// PresentRects flipt alleen de gegeven rechthoeken (surface-lokaal; nil =
+// alles) — het app-side verlengstuk van de damage-stream: een hover-wissel
+// flipt twee knopjes, geen 1,7MB window.
+func (c *Compositor) PresentRects(s *Surface, rects []image.Rectangle) {
 	s.mu.Lock()
-	copy(s.front, s.back)
+	sb := image.Rect(0, 0, s.w, s.h)
+	if len(rects) == 0 {
+		rects = []image.Rectangle{sb}
+	}
+	clipped := rects[:0]
+	for _, r := range rects {
+		r = r.Intersect(sb)
+		if r.Empty() {
+			continue
+		}
+		w := r.Dx() * 4
+		for y := r.Min.Y; y < r.Max.Y; y++ {
+			off := (y*s.w + r.Min.X) * 4
+			copy(s.front[off:off+w], s.back[off:off+w])
+		}
+		clipped = append(clipped, r)
+	}
 	s.presented = true
 	s.mu.Unlock()
+
 	c.mu.Lock()
 	c.dirty = true
-	c.addDamageLocked(s.screen)
+	for _, r := range clipped {
+		c.addDamageLocked(r.Add(s.screen.Min).Intersect(s.screen))
+	}
 	c.mu.Unlock()
 }
 
@@ -284,25 +303,6 @@ func (c *Compositor) addDamageLocked(r image.Rectangle) {
 	if !r.Empty() {
 		c.pending = append(c.pending, r)
 	}
-}
-
-// cursorRect is het door de cursor geraakte vlak rond (x,y).
-func cursorRect(x, y int) image.Rectangle {
-	return image.Rect(x-6, y-6, x+7, y+7)
-}
-
-// SetCursor beweegt de muiscursor (schermcoördinaten).
-func (c *Compositor) SetCursor(x, y int) {
-	c.mu.Lock()
-	if !c.curOn || c.curX != x || c.curY != y {
-		if c.curOn {
-			c.addDamageLocked(cursorRect(c.curX, c.curY)) // oude plek wissen
-		}
-		c.curOn, c.curX, c.curY = true, x, y
-		c.addDamageLocked(cursorRect(x, y))
-		c.dirty = true
-	}
-	c.mu.Unlock()
 }
 
 // SurfaceAt zoekt de surface onder schermpunt (x,y) en geeft de lokale
@@ -372,7 +372,8 @@ func (c *Compositor) composeLocked() (gen uint64, changed bool) {
 	}
 	c.dirty = false
 	c.gen++
-	c.frameLog[c.gen] = c.pending
+	clips := c.pending
+	c.frameLog[c.gen] = clips
 	c.pending = nil
 	if c.minGen == 0 {
 		c.minGen = c.gen
@@ -382,51 +383,81 @@ func (c *Compositor) composeLocked() (gen uint64, changed bool) {
 		c.minGen++
 	}
 
-	pixel.Fill(c.img, c.img.Bounds(), colBG)
+	// Partieel waar het kan (de klap op een geëmuleerde/kleine core: een
+	// hover-wissel hertekent twee knopjes, niet 3,7MB scherm), volledig bij
+	// de eerste keer of wanneer een clip het hele scherm dekt.
+	full := c.gen == 1 || len(clips) == 0
+	for _, r := range clips {
+		if r == c.img.Bounds() {
+			full = true
+			break
+		}
+	}
+	if full {
+		clips = []image.Rectangle{c.img.Bounds()}
+	}
+	for _, clip := range clips {
+		c.redrawRegionLocked(clip)
+	}
 	if len(c.surfaces) == 0 {
 		pixel.DrawString(c.img, margin, margin, 1, colBorderIdle, "hopos display: no surfaces")
-		return c.gen, true
 	}
+	return c.gen, true
+}
+
+// redrawRegionLocked hertekent één schermregio deterministisch: achtergrond,
+// dan van elk snijdend window de geraakte delen. Titelbalk en rand worden
+// bij een snijding integraal hertekend (goedkoop en scheelt clip-logica in
+// de tekst-glyphs — dezelfde pixels opnieuw schrijven is onschadelijk).
+func (c *Compositor) redrawRegionLocked(clip image.Rectangle) {
+	clip = clip.Intersect(c.img.Bounds())
+	if clip.Empty() {
+		return
+	}
+	pixel.Fill(c.img, clip, colBG)
 
 	for _, s := range c.surfaces {
+		if !s.win.Overlaps(clip) {
+			continue
+		}
 		title, border := colTitleIdle, colBorderIdle
 		if s == c.focus {
 			title, border = colTitleFocus, colBorderFocus
 		}
-		// Titelbalk + naam (het cluster zichtbaar in de chrome: de app zet
-		// zijn herkomst in de naam, bv. "clock @ node-b").
 		bar := image.Rect(s.win.Min.X, s.win.Min.Y, s.win.Max.X, s.win.Min.Y+c.titleH)
-		pixel.Fill(c.img, bar, title)
-		pixel.DrawString(c.img, s.win.Min.X+4*c.scale, s.win.Min.Y+3, c.scale, colText, s.Name)
-
-		// Content: de surface heeft exact de content-maat (WM-gestuurd);
-		// tijdens een resize-overgang clippen we defensief.
-		s.mu.Lock()
-		if !s.presented {
-			pixel.Fill(c.img, s.screen, colContentPad)
-		} else {
-			cw, ch := s.w, s.h
-			if cw > s.screen.Dx() {
-				cw = s.screen.Dx()
-			}
-			if ch > s.screen.Dy() {
-				ch = s.screen.Dy()
-			}
-			for row := 0; row < ch; row++ {
-				src := s.front[row*s.w*4 : row*s.w*4+cw*4]
-				dstOff := c.img.PixOffset(s.screen.Min.X, s.screen.Min.Y+row)
-				copy(c.img.Pix[dstOff:dstOff+cw*4], src)
-			}
+		if bar.Overlaps(clip) {
+			// Titelbalk + naam (het cluster zichtbaar in de chrome).
+			pixel.Fill(c.img, bar, title)
+			pixel.DrawString(c.img, s.win.Min.X+4*c.scale, s.win.Min.Y+3, c.scale, colText, s.Name)
 		}
-		s.mu.Unlock()
+
+		if content := s.screen.Intersect(clip); !content.Empty() {
+			s.mu.Lock()
+			if !s.presented {
+				pixel.Fill(c.img, content, colContentPad)
+			} else {
+				// Surface-lokale bron van dit schermdeel; defensief clippen
+				// op de surfacemaat (resize-overgang).
+				lx := content.Min.X - s.screen.Min.X
+				ly := content.Min.Y - s.screen.Min.Y
+				cw, ch := content.Dx(), content.Dy()
+				if lx+cw > s.w {
+					cw = s.w - lx
+				}
+				if ly+ch > s.h {
+					ch = s.h - ly
+				}
+				for row := 0; row < ch; row++ {
+					src := s.front[((ly+row)*s.w+lx)*4:]
+					dstOff := c.img.PixOffset(content.Min.X, content.Min.Y+row)
+					copy(c.img.Pix[dstOff:dstOff+cw*4], src[:cw*4])
+				}
+			}
+			s.mu.Unlock()
+		}
 
 		pixel.Outline(c.img, s.win, border)
 	}
-
-	if c.curOn {
-		drawCursor(c.img, c.curX, c.curY)
-	}
-	return c.gen, true
 }
 
 // Snapshot geeft een kopie van het gecomponeerde beeld (voor de PNG-encoder:
@@ -439,25 +470,10 @@ func (c *Compositor) Snapshot() (*image.RGBA, uint64) {
 	return cp, c.gen
 }
 
-// drawCursor tekent een crosshair-cursor met donker randje (zichtbaar op
-// licht én donker); de HVS maakt hier in P4 een hardware-plane van.
-func drawCursor(img *image.RGBA, x, y int) {
-	for d := -5; d <= 5; d++ {
-		for _, p := range [][2]int{{x + d, y - 1}, {x + d, y + 1}, {x - 1, y + d}, {x + 1, y + d}} {
-			if image.Pt(p[0], p[1]).In(img.Bounds()) {
-				img.SetRGBA(p[0], p[1], colCursorRim)
-			}
-		}
-	}
-	for d := -4; d <= 4; d++ {
-		if image.Pt(x+d, y).In(img.Bounds()) {
-			img.SetRGBA(x+d, y, colCursor)
-		}
-		if image.Pt(x, y+d).In(img.Bounds()) {
-			img.SetRGBA(x, y+d, colCursor)
-		}
-	}
-}
+// De muiscursor wordt hier bewust NIET gecomponeerd (besluit Derek 19-07):
+// de browser-KVM heeft z'n eigen cursor gratis, en op een echt scherm wordt
+// het straks een eigen HVS-plane (docs/gui-ontwerp.md §5) — nooit pixels in
+// de compositie. Bijvangst: muisbewegingen maken het scherm niet vuil.
 
 // FrameSince componeert (indien nodig) en pakt alles wat er sinds generatie
 // since veranderde in één wire-frame voor een kijker-stream (/stream):

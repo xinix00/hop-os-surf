@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -17,52 +18,73 @@ import (
 	"github.com/xinix00/hop-os-surf/window"
 )
 
-// readFrame leest één stream-frame (u32 len | payload) met een deadline.
-func readFrame(t *testing.T, rd *bufio.Reader) []byte {
-	t.Helper()
-	var lenb [4]byte
-	if _, err := ioReadFull(rd, lenb[:]); err != nil {
-		t.Fatalf("frame length: %v", err)
-	}
-	n := binary.LittleEndian.Uint32(lenb[:])
-	p := make([]byte, n)
-	if _, err := ioReadFull(rd, p); err != nil {
-		t.Fatalf("frame body: %v", err)
-	}
-	return p
+// collectFrames leest de stream continu en levert per frame de rects op een
+// channel — de test kan dan met timeouts asserteren, ook op afwezigheid,
+// zonder blokkerende reads in de testbody.
+func collectFrames(body io.Reader) <-chan []image.Rectangle {
+	ch := make(chan []image.Rectangle, 64)
+	rd := bufio.NewReader(body)
+	go func() {
+		defer close(ch)
+		for {
+			var lenb [4]byte
+			if _, err := io.ReadFull(rd, lenb[:]); err != nil {
+				return
+			}
+			p := make([]byte, binary.LittleEndian.Uint32(lenb[:]))
+			if _, err := io.ReadFull(rd, p); err != nil {
+				return
+			}
+			n := int(binary.LittleEndian.Uint16(p))
+			rects := make([]image.Rectangle, n)
+			off := 2
+			for i := 0; i < n; i++ {
+				x := int(binary.LittleEndian.Uint16(p[off:]))
+				y := int(binary.LittleEndian.Uint16(p[off+2:]))
+				w := int(binary.LittleEndian.Uint16(p[off+4:]))
+				h := int(binary.LittleEndian.Uint16(p[off+6:]))
+				rects[i] = image.Rect(x, y, x+w, y+h)
+				off += 8
+			}
+			ch <- rects
+		}
+	}()
+	return ch
 }
 
-func ioReadFull(rd *bufio.Reader, p []byte) (int, error) {
+// next wacht op één frame (of faalt na de deadline).
+func next(t *testing.T, ch <-chan []image.Rectangle, what string) []image.Rectangle {
+	t.Helper()
+	select {
+	case rects, ok := <-ch:
+		if !ok {
+			t.Fatalf("%s: stream closed", what)
+		}
+		return rects
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s: no frame", what)
+		return nil
+	}
+}
+
+// quiet telt frames tot het stil is (assert-afwezigheid met korte deadline).
+func quiet(ch <-chan []image.Rectangle, d time.Duration) int {
 	n := 0
-	for n < len(p) {
-		k, err := rd.Read(p[n:])
-		n += k
-		if err != nil {
-			return n, err
+	for {
+		select {
+		case _, ok := <-ch:
+			if !ok {
+				return n
+			}
+			n++
+		case <-time.After(d):
+			return n
 		}
 	}
-	return n, nil
 }
 
-// parseFrame geeft de rects en het pixelblok van een frame-payload.
-func parseFrame(t *testing.T, p []byte) []image.Rectangle {
-	t.Helper()
-	n := int(binary.LittleEndian.Uint16(p))
-	rects := make([]image.Rectangle, n)
-	off := 2
-	for i := 0; i < n; i++ {
-		x := int(binary.LittleEndian.Uint16(p[off:]))
-		y := int(binary.LittleEndian.Uint16(p[off+2:]))
-		w := int(binary.LittleEndian.Uint16(p[off+4:]))
-		h := int(binary.LittleEndian.Uint16(p[off+6:]))
-		rects[i] = image.Rect(x, y, x+w, y+h)
-		off += 8
-	}
-	return rects
-}
-
-// TestStream: kijkers krijgen eerst het volle scherm en daarna alleen de
-// veranderde rechthoeken — idle is nul bytes.
+// TestStream: kijkers krijgen eerst het volle scherm, daarna alleen de
+// veranderde rechthoeken; muisbewegingen componeren niets meer.
 func TestStream(t *testing.T) {
 	comp := compositor.New(320, 200)
 	srv := New(comp, t.Logf)
@@ -79,46 +101,47 @@ func TestStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	rd := bufio.NewReader(resp.Body)
+	frames := collectFrames(resp.Body)
 
 	// Frame 1: het volledige scherm.
-	rects := parseFrame(t, readFrame(t, rd))
+	rects := next(t, frames, "first frame")
 	if len(rects) != 1 || rects[0] != image.Rect(0, 0, 320, 200) {
 		t.Fatalf("first frame must be full screen, got %v", rects)
 	}
 
-	// App verbindt en presenteert: het volgende frame is (veel) kleiner dan
-	// het scherm maar dekt het window.
+	// App verbindt en presenteert vol.
 	win, err := window.Open(l.Addr().String(), "w @ n", 60, 40, t.Logf)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer win.Close()
 	red := color.RGBA{0xEE, 0x10, 0x10, 0xFF}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		img := win.Image()
-		draw.Draw(img, img.Bounds(), image.NewUniform(red), image.Point{}, draw.Src)
-		if err := win.Present(); err != nil {
-			t.Fatal(err)
-		}
-		rects = parseFrame(t, readFrame(t, rd))
-		if len(rects) > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("no damage frame")
-		}
+	img := win.Image()
+	draw.Draw(img, img.Bounds(), image.NewUniform(red), image.Point{}, draw.Src)
+	if err := win.Present(); err != nil {
+		t.Fatal(err)
 	}
+	next(t, frames, "frame after present")
+	quiet(frames, 300*time.Millisecond)
 
-	// Cursorbeweging: een klein damage-frame (niet het volle scherm).
-	srv.Input(surf.Input{Kind: surf.InputMove, X: 100, Y: 100})
-	rects = parseFrame(t, readFrame(t, rd))
+	// Partiële present: het frame draagt alléén dat blokje.
+	win.Image().SetRGBA(3, 3, color.RGBA{0x10, 0x10, 0xEE, 0xFF})
+	if err := win.Present(image.Rect(2, 2, 10, 10)); err != nil {
+		t.Fatal(err)
+	}
+	rects = next(t, frames, "partial frame")
 	total := 0
 	for _, r := range rects {
 		total += r.Dx() * r.Dy()
 	}
-	if total >= 320*200/2 {
-		t.Fatalf("cursor move produced %dpx damage, want small rects: %v", total, rects)
+	if total > 32*32 {
+		t.Fatalf("partial present produced %dpx damage, want tiny: %v", total, rects)
+	}
+	quiet(frames, 200*time.Millisecond)
+
+	// Muisbewegingen componeren niets meer (cursor = browser/plane).
+	srv.Input(surf.Input{Kind: surf.InputMove, X: 100, Y: 100})
+	if n := quiet(frames, 300*time.Millisecond); n != 0 {
+		t.Fatalf("cursor move must not compose, got %d frames", n)
 	}
 }

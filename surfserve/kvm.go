@@ -41,9 +41,15 @@ function paint(p) {
     pix += w * h * 4;
   }
 }
+const canInflate = typeof DecompressionStream !== "undefined";
+async function inflate(u8) {
+  const ds = new DecompressionStream("deflate-raw");
+  const st = new Blob([u8]).stream().pipeThrough(ds);
+  return new Uint8Array(await new Response(st).arrayBuffer());
+}
 async function stream() {
   try {
-    const resp = await fetch("/stream");
+    const resp = await fetch(canInflate ? "/stream?z=1" : "/stream");
     if (!resp.ok || !resp.body) throw new Error(resp.status);
     const rd = resp.body.getReader();
     let buf = new Uint8Array(0);
@@ -58,7 +64,8 @@ async function stream() {
         if (buf.length < 4) break;
         const len = new DataView(buf.buffer, buf.byteOffset).getUint32(0, true);
         if (buf.length < 4 + len) break;
-        paint(buf.subarray(4, 4 + len));
+        const body = buf.subarray(4, 4 + len);
+        paint(canInflate ? await inflate(body) : body);
         buf = buf.subarray(4 + len);
       }
     }
@@ -74,7 +81,18 @@ function pollOnce() {
   im.src = "/screen.png?" + Date.now();
 }
 stream();
-function post(o) { fetch("/input", {method: "POST", body: JSON.stringify(o)}); }
+let ws = null;
+function wsConnect() {
+  const u = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/input";
+  try { ws = new WebSocket(u); } catch (e) { ws = null; return; }
+  ws.onclose = ws.onerror = () => { ws = null; setTimeout(wsConnect, 1000); };
+}
+wsConnect();
+function post(o) {
+  const j = JSON.stringify(o);
+  if (ws && ws.readyState === 1) { ws.send(j); }         // één blijvende socket
+  else { fetch("/input", {method: "POST", body: j}); }   // fallback
+}
 function pos(e) {
   const r = cv.getBoundingClientRect();
   if (!cv.width || !r.width) return null; // nog geen frame: liever niks dan (0,0)
@@ -85,7 +103,7 @@ let moveT = null, lastMove = null;
 cv.addEventListener("mousemove", e => {
   lastMove = pos(e);
   if (moveT || !lastMove) return;
-  moveT = setTimeout(() => { moveT = null; if (lastMove) post({k: "move", ...lastMove}); }, 66);
+  moveT = setTimeout(() => { moveT = null; if (lastMove) post({k: "move", ...lastMove}); }, 33);
 });
 cv.addEventListener("mousedown", e => { cv.focus(); const p = pos(e); if (p) post({k: "btn", c: e.button, v: 1, ...p}); e.preventDefault(); });
 cv.addEventListener("mouseup",   e => { const p = pos(e); if (p) post({k: "btn", c: e.button, v: 0, ...p}); e.preventDefault(); });

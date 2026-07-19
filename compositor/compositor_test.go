@@ -1,6 +1,8 @@
 package compositor
 
 import (
+	"bytes"
+	"image"
 	"testing"
 )
 
@@ -161,16 +163,59 @@ func TestStaleDamage(t *testing.T) {
 	}
 }
 
-// TestCursorDirty: cursorbeweging maakt het scherm vuil, stilstand niet.
-func TestCursorDirty(t *testing.T) {
-	c := New(100, 100)
-	c.Compose()
-	c.SetCursor(10, 10)
-	if _, changed := c.Compose(); !changed {
-		t.Fatal("cursor move must redraw")
+// TestPresentRects: partiële flip — alleen de gegeven rects worden zichtbaar.
+func TestPresentRects(t *testing.T) {
+	c := New(320, 200)
+	s := c.Add("one", 0, 0)
+	c.Relayout()
+	w, h := s.Size()
+
+	// Back-buffer volledig groen, maar presenteer alleen een blokje.
+	if err := s.Damage(0, 0, w, h, wireFill(w, h, 0x10, 0xEE, 0x10)); err != nil {
+		t.Fatal(err)
 	}
-	c.SetCursor(10, 10)
-	if _, changed := c.Compose(); changed {
-		t.Fatal("same cursor position must not redraw")
+	c.PresentRects(s, []image.Rectangle{image.Rect(4, 4, 12, 12)})
+	c.Compose()
+	img, _ := c.Snapshot()
+	if p := img.RGBAAt(s.screen.Min.X+5, s.screen.Min.Y+5); p.G != 0xEE {
+		t.Fatalf("presented rect must be visible, got %+v", p)
+	}
+	if p := img.RGBAAt(s.screen.Min.X+40, s.screen.Min.Y+40); p.G == 0xEE {
+		t.Fatalf("un-presented area must stay hidden, got %+v", p)
+	}
+}
+
+// TestPartialComposeEquivalence: een reeks partiële composes eindigt in
+// exact dezelfde pixels als één volledige hertekening — de eigenschap die
+// partieel componeren veilig maakt.
+func TestPartialComposeEquivalence(t *testing.T) {
+	c := New(320, 200)
+	s1 := c.Add("one", 0, 0)
+	s2 := c.Add("two", 0, 0)
+	c.Relayout()
+	c.Compose() // eerste = vol
+
+	fillPresent(c, s1, 0xEE, 0x10, 0x10)
+	c.Compose() // partieel: window 1
+	w2, h2 := s2.Size()
+	if err := s2.Damage(0, 0, w2, h2, wireFill(w2, h2, 0x10, 0xEE, 0x10)); err != nil {
+		t.Fatal(err)
+	}
+	c.PresentRects(s2, []image.Rectangle{image.Rect(3, 3, 30, 20)})
+	c.Compose() // partieel: blokje in window 2
+	c.ClickAt(s1.screen.Min.X+5, s1.screen.Min.Y+5)
+	c.Compose() // partieel: twee titelbalken/randen (focuswissel)
+	incr, _ := c.Snapshot()
+
+	// Forceer een volledige hertekening van exact dezelfde toestand.
+	c.mu.Lock()
+	c.dirty = true
+	c.pending = []image.Rectangle{c.img.Bounds()}
+	c.mu.Unlock()
+	c.Compose()
+	full, _ := c.Snapshot()
+
+	if !bytes.Equal(incr.Pix, full.Pix) {
+		t.Fatal("incremental compose diverged from full redraw")
 	}
 }

@@ -190,32 +190,57 @@ func Render(img *image.RGBA, c *Calc, hover byte) {
 	pixel.DrawString(img, tx, display.Min.Y+(display.Dy()-8*scale)/2, scale, colText, txt)
 
 	for i, r := range btns {
-		key := keyOf(i)
-		col, edge := colBtn, colEdge
-		hov := key == hover
-		switch {
-		case key == '=':
-			col = colBtnEq
-			if hov {
-				col = colBtnEqHov
-			}
-		case key == '+' || key == '-' || key == '*' || key == '/' || key == 'C':
-			col = colBtnOp
-			if hov {
-				col = colBtnOpHov
-			}
-		default:
-			if hov {
-				col = colBtnHov
-			}
-		}
-		if hov {
-			edge = colEdgeHov
-		}
-		pixel.Fill(img, r, col)
-		pixel.Outline(img, r, edge)
-		pixel.DrawStringCentered(img, r, scale, colText, label(key))
+		drawButton(img, r, keyOf(i), hover, scale)
 	}
+}
+
+// RenderKey hertekent alléén de knop van deze toets (voor het hover-pad:
+// twee knopjes per wissel in plaats van het hele window) en geeft de
+// geraakte rechthoek terug; nul-rect als de toets geen knop is.
+func RenderKey(img *image.RGBA, c *Calc, key, hover byte) image.Rectangle {
+	if key == 0 {
+		return image.Rectangle{}
+	}
+	_, btns := layout(img.Bounds())
+	scale := img.Bounds().Dy() / 200
+	if scale < 1 {
+		scale = 1
+	}
+	for i, r := range btns {
+		if keyOf(i) == key {
+			drawButton(img, r, key, hover, scale)
+			return r
+		}
+	}
+	return image.Rectangle{}
+}
+
+// drawButton tekent één knop (met hover-state).
+func drawButton(img *image.RGBA, r image.Rectangle, key, hover byte, scale int) {
+	col, edge := colBtn, colEdge
+	hov := key == hover
+	switch {
+	case key == '=':
+		col = colBtnEq
+		if hov {
+			col = colBtnEqHov
+		}
+	case key == '+' || key == '-' || key == '*' || key == '/' || key == 'C':
+		col = colBtnOp
+		if hov {
+			col = colBtnOpHov
+		}
+	default:
+		if hov {
+			col = colBtnHov
+		}
+	}
+	if hov {
+		edge = colEdgeHov
+	}
+	pixel.Fill(img, r, col)
+	pixel.Outline(img, r, edge)
+	pixel.DrawStringCentered(img, r, scale, colText, label(key))
 }
 
 // keyOf geeft de Press-toets van knopindex i (0..16).

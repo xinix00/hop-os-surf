@@ -6,8 +6,11 @@ package surfserve
 
 import (
 	"bytes"
+	"compress/flate"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"image"
 	"image/png"
 	"net"
 	"net/http"
@@ -64,8 +67,9 @@ type session struct {
 
 	writeMu sync.Mutex // INPUT/CONFIGURE delen de stream met elkaar
 
-	mu       sync.Mutex // surfaces: read-lus, relayout-callbacks én input-routering
+	mu       sync.Mutex // surfaces/damage: read-lus, relayout-callbacks én input-routering
 	surfaces map[uint16]*compositor.Surface
+	damage   map[uint16][]image.Rectangle // rects van dit frame, tot de PRESENT
 }
 
 // get geeft de surface bij een id (nil onbekend).
@@ -96,6 +100,28 @@ func (sess *session) idOf(sur *compositor.Surface) (uint16, bool) {
 	return 0, false
 }
 
+// addDamage onthoudt een frame-rect tot de PRESENT (gemaximeerd: bij >32
+// rects is één volle flip goedkoper dan de administratie).
+func (sess *session) addDamage(id uint16, r image.Rectangle) {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if acc, ok := sess.damage[id]; !ok || len(acc) <= 32 {
+		sess.damage[id] = append(acc, r)
+	}
+}
+
+// takeDamage geeft de opgebouwde rects van dit frame (nil = alles flippen).
+func (sess *session) takeDamage(id uint16) []image.Rectangle {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	acc := sess.damage[id]
+	delete(sess.damage, id)
+	if len(acc) > 32 {
+		return nil
+	}
+	return acc
+}
+
 // takeAll leegt de map (cleanup) en geeft alle surfaces terug.
 func (sess *session) takeAll() []*compositor.Surface {
 	sess.mu.Lock()
@@ -120,7 +146,11 @@ func (s *Server) ServeSURF(l net.Listener) error {
 }
 
 func (s *Server) handle(conn net.Conn) {
-	sess := &session{srv: s, conn: conn, surfaces: make(map[uint16]*compositor.Surface)}
+	sess := &session{
+		srv: s, conn: conn,
+		surfaces: make(map[uint16]*compositor.Surface),
+		damage:   make(map[uint16][]image.Rectangle),
+	}
 	defer sess.cleanup()
 
 	var buf []byte
@@ -179,9 +209,12 @@ func (s *Server) handle(conn net.Conn) {
 				s.logf("surf: %s: %v", sess.app, err)
 				return
 			}
+			sess.addDamage(h.Surface, image.Rect(int(d.X), int(d.Y), int(d.X)+int(d.W), int(d.Y)+int(d.H)))
 		case surf.TypePresent:
 			if sur := sess.get(h.Surface); sur != nil {
-				s.comp.Present(sur)
+				// Alleen de gedamagede rects flippen — partiële presents
+				// (hover, klok-wijzers) blijven zo klein tot in de stream.
+				s.comp.PresentRects(sur, sess.takeDamage(h.Surface))
 			}
 		case surf.TypeClose:
 			return
@@ -236,7 +269,9 @@ func (s *Server) Input(ev surf.Input) {
 
 	switch ev.Kind {
 	case surf.InputMove:
-		s.comp.SetCursor(int(ev.X), int(ev.Y))
+		// Geen SetCursor: de cursor wordt niet gecomponeerd (browser heeft
+		// z'n eigen; op de Pi straks een HVS-plane) — een move kost het
+		// scherm dus niets, alleen de app onder de aanwijzer hoort hem.
 		sur, lx, ly, ok = s.comp.SurfaceAt(int(ev.X), int(ev.Y))
 	case surf.InputButton:
 		if ev.Value != 0 {
@@ -326,10 +361,32 @@ func (s *Server) serveStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "no-store")
 
+	// ?z=1: elk frame deflate-raw gecomprimeerd (browser: DecompressionStream
+	// — lossless, geen JS-bibliotheek). Het vlakke instrumentenpaneel haalt
+	// makkelijk 20-50×; BestSpeed houdt de display-core vrij. De framing
+	// blijft gelijk: u32 len | (gecomprimeerde) payload.
+	var zw *flate.Writer
+	var zbuf bytes.Buffer
+	if r.URL.Query().Get("z") == "1" {
+		zw, _ = flate.NewWriter(&zbuf, flate.BestSpeed)
+	}
+
 	var gen uint64
 	for {
 		frame, next := s.comp.FrameSince(gen)
 		if next != gen {
+			if zw != nil {
+				zbuf.Reset()
+				zbuf.Write([]byte{0, 0, 0, 0})
+				zw.Reset(&zbuf)
+				zw.Write(frame[4:])
+				if err := zw.Close(); err != nil { // Close: het eindblok, anders wacht de browser
+					return
+				}
+				out := zbuf.Bytes()
+				binary.LittleEndian.PutUint32(out, uint32(len(out)-4))
+				frame = out
+			}
 			if _, err := w.Write(frame); err != nil {
 				return
 			}
@@ -339,7 +396,7 @@ func (s *Server) serveStream(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
-		case <-time.After(40 * time.Millisecond):
+		case <-time.After(15 * time.Millisecond):
 		}
 	}
 }
@@ -353,16 +410,8 @@ type inputMsg struct {
 	Y int    `json:"y"`
 }
 
-func (s *Server) serveInput(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "POST only", http.StatusMethodNotAllowed)
-		return
-	}
-	var m inputMsg
-	if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
+// event vertaalt het JSON-event naar een surf.Input.
+func (m inputMsg) event() (surf.Input, bool) {
 	ev := surf.Input{Code: uint32(m.C), Value: int32(m.V), X: clampU16(m.X), Y: clampU16(m.Y)}
 	switch m.K {
 	case "key":
@@ -374,6 +423,27 @@ func (s *Server) serveInput(w http.ResponseWriter, r *http.Request) {
 	case "wheel":
 		ev.Kind = surf.InputWheel
 	default:
+		return surf.Input{}, false
+	}
+	return ev, true
+}
+
+func (s *Server) serveInput(w http.ResponseWriter, r *http.Request) {
+	if wsUpgrade(r) {
+		s.serveInputWS(w, r) // de blijvende input-stream van de KVM-pagina
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var m inputMsg
+	if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	ev, ok := m.event()
+	if !ok {
 		http.Error(w, "unknown kind", http.StatusBadRequest)
 		return
 	}

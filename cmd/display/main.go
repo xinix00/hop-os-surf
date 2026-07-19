@@ -12,11 +12,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/xinix00/hop-os-surf/compositor"
+	"github.com/xinix00/hop-os-surf/surf"
+	"github.com/xinix00/hop-os-surf/surfserve"
 	"hop-os/metal/app/applib"
 	"hop-os/metal/app/applib/appnet"
-	"github.com/xinix00/hop-os-surf/compositor"
-	"github.com/xinix00/hop-os-surf/surfserve"
-	"github.com/xinix00/hop-os-surf/surf"
 )
 
 func main() {

@@ -7,6 +7,7 @@ package main
 
 import (
 	"fmt"
+	"image"
 
 	"hop-os/metal/app/applib"
 	"hop-os/metal/app/applib/appnet"
@@ -62,7 +63,26 @@ func main() {
 			if h == hover {
 				continue
 			}
+			old := hover
 			hover = h
+			// Alleen de twee geraakte knoppen hertekenen en presenteren:
+			// een hover-wissel is ~130KB i.p.v. een window van 1,7MB.
+			img := win.Image()
+			r1 := calc.RenderKey(img, &c, old, hover)
+			r2 := calc.RenderKey(img, &c, hover, hover)
+			var rects []image.Rectangle
+			for _, r := range []image.Rectangle{r1, r2} {
+				if !r.Empty() {
+					rects = append(rects, r)
+				}
+			}
+			if len(rects) > 0 {
+				if err := win.Present(rects...); err != nil {
+					app.Logf("calc: present: %v", err)
+					app.Exit(1)
+				}
+			}
+			continue
 		case ev.Kind == surf.InputButton && ev.Value == 1:
 			key = calc.Hit(win.Image().Bounds(), int(ev.X), int(ev.Y))
 		case ev.Kind == surf.InputKey && ev.Value == 1:

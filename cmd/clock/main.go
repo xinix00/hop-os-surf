@@ -59,10 +59,22 @@ func main() {
 	last := -1
 	for {
 		now := time.Now()
-		if s := now.Second(); s != last || resized.Swap(false) {
+		res := resized.Swap(false)
+		if s := now.Second(); s != last || res {
+			full := last < 0 || res // eerste frame of net geresized: alles
 			last = s
-			face.Draw(win.Image(), now)
-			if err := win.Present(); err != nil {
+			img := win.Image()
+			face.Draw(img, now)
+			var err error
+			if full {
+				err = win.Present()
+			} else {
+				// Alleen het wijzer-gebied de lijn over (ring en streepjes
+				// veranderen nooit) — en met de stream-compressie erachter
+				// is dat bijna niets.
+				err = win.Present(face.HandsBox(img.Bounds()))
+			}
+			if err != nil {
 				app.Logf("clock: present: %v", err)
 				app.Exit(1)
 			}

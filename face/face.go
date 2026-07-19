@@ -20,6 +20,21 @@ var (
 	colSecond = color.RGBA{0xFF, 0x6E, 0x50, 0xFF}
 )
 
+// HandsBox is de rechthoek waarbinnen álle wijzers en de naaf leven — het
+// enige dat per seconde verandert. Wie op tijd t en t' tekent hoeft alleen
+// deze box te presenteren (de ring en de uur-streepjes liggen erbuiten en
+// veranderen nooit).
+func HandsBox(b image.Rectangle) image.Rectangle {
+	cx, cy := b.Min.X+b.Dx()/2, b.Min.Y+b.Dy()/2
+	r := b.Dx()
+	if b.Dy() < r {
+		r = b.Dy()
+	}
+	r = r/2 - 8
+	m := int(float64(r)*0.86) + 3 // langste wijzer + dikte
+	return image.Rect(cx-m, cy-m, cx+m+1, cy+m+1).Intersect(b)
+}
+
 // Draw tekent de wijzerplaat over het hele beeld (vierkant werkt het mooist).
 func Draw(img *image.RGBA, now time.Time) {
 	draw.Draw(img, img.Bounds(), image.NewUniform(colFace), image.Point{}, draw.Src)

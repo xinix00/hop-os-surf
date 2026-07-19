@@ -98,19 +98,27 @@ func (win *Window) Size() (w, h int) {
 // een verse-waarde-stroom, geen log.
 func (win *Window) Events() <-chan Event { return win.events }
 
-// Present maakt de huidige Image-inhoud atomisch zichtbaar. V1 stuurt het
-// volle frame als één DAMAGE (damage-rects komen als het meten daarom
-// vraagt). Bij een kapotte verbinding blokkeert Present tot de display terug
-// is — een GUI-app zonder display heeft toch niets te doen.
+// Present maakt de huidige Image-inhoud atomisch zichtbaar. Zonder
+// argumenten gaat het volle frame de lijn over; met rects alleen die
+// rechthoeken (beeldcoördinaten) — de rest van de buffer is dan per
+// definitie ongewijzigd sinds de vorige Present (dat is het contract:
+// partieel presenteren betekent dat je alleen dáár getekend hebt). Bij een
+// kapotte verbinding blokkeert Present tot de display terug is, en na een
+// herverbinding gaat er altijd eerst een vol frame op (de display begon
+// met een lege surface).
 //
 // Semantiek is at-most-once per aanroep: een breuk die pas ná de write
 // zichtbaar wordt (TCP-buffer) kan één frame kosten, maar de leesgoroutine
-// markeert de sessie dood en de eerstvolgende Present herverbindt en stuurt
-// sowieso een vol frame — een app die blijft presenteren heelt zichzelf.
-// Present is bedoeld voor één tekenende goroutine.
-func (win *Window) Present() error {
-	for {
-		err := win.present()
+// markeert de sessie dood en de eerstvolgende Present herverbindt — een app
+// die blijft presenteren heelt zichzelf. Present is bedoeld voor één
+// tekenende goroutine.
+func (win *Window) Present(rects ...image.Rectangle) error {
+	for first := true; ; first = false {
+		r := rects
+		if !first {
+			r = nil // na een reconnect: altijd een vol frame
+		}
+		err := win.present(r)
 		if err == nil {
 			return nil
 		}
@@ -124,29 +132,48 @@ func (win *Window) Present() error {
 	}
 }
 
-func (win *Window) present() error {
+func (win *Window) present(rects []image.Rectangle) error {
 	win.mu.Lock()
 	conn, dead := win.conn, win.dead
 	win.mu.Unlock()
 	if dead {
 		return errClosed
 	}
-	// RGBA → wire (XRGB8888 little-endian): de enige kopie aan de zendkant.
 	// img/scratch wisselen alleen in Image() (zelfde tekengoroutine als
 	// Present — dat is het contract), dus hier consistent.
 	img, scratch := win.img, win.scratch
-	w, h := img.Bounds().Dx(), img.Bounds().Dy()
-	pix := img.Pix
-	for i := 0; i < w*h; i++ {
-		scratch[i*4+0] = pix[i*4+2]
-		scratch[i*4+1] = pix[i*4+1]
-		scratch[i*4+2] = pix[i*4+0]
-		scratch[i*4+3] = 0
+	b := img.Bounds()
+	if len(rects) == 0 {
+		rects = []image.Rectangle{b}
 	}
 	win.frame++
-	d := surf.Damage{Frame: win.frame, W: uint16(w), H: uint16(h)}
-	if err := surf.WriteDamage(conn, 1, d, scratch); err != nil {
-		return err
+	for _, r := range rects {
+		r = r.Intersect(b)
+		if r.Empty() {
+			continue
+		}
+		// RGBA → wire (XRGB8888 little-endian), alleen de rect-rijen: de
+		// enige kopie aan de zendkant.
+		w, h := r.Dx(), r.Dy()
+		i := 0
+		for y := r.Min.Y; y < r.Max.Y; y++ {
+			src := img.Pix[img.PixOffset(r.Min.X, y):]
+			for x := 0; x < w; x++ {
+				scratch[i*4+0] = src[x*4+2]
+				scratch[i*4+1] = src[x*4+1]
+				scratch[i*4+2] = src[x*4+0]
+				scratch[i*4+3] = 0
+				i++
+			}
+		}
+		d := surf.Damage{
+			Frame: win.frame,
+			X:     uint16(r.Min.X - b.Min.X), Y: uint16(r.Min.Y - b.Min.Y),
+			W: uint16(w), H: uint16(h),
+		}
+		if err := surf.WriteDamage(conn, 1, d, scratch[:w*h*4]); err != nil {
+			return err
+		}
 	}
 	return surf.WriteMsg(conn, surf.TypePresent, 1, surf.Present{Frame: win.frame}.Encode())
 }
