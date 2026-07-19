@@ -64,10 +64,12 @@ func TestResizeFlow(t *testing.T) {
 		t.Fatalf("single window got width %d, want near-fullscreen", w)
 	}
 	fill(win1)
-	full := countColor(t, web.URL, red)
-	if full < 250*120 {
-		t.Fatalf("full-cell fill covers only %d px", full)
-	}
+	// De present wordt asynchroon door de sessie verwerkt: pollen.
+	var full int
+	eventually(t, "full-cell fill visible", func() bool {
+		full = countColor(t, web.URL, red)
+		return full >= 250*120
+	})
 
 	// Window 2 erbij: win1 krijgt een nieuwe (kleinere) maat en hertekent.
 	win2, err := window.Open(l.Addr().String(), "half @ node-b", 60, 40, t.Logf)
