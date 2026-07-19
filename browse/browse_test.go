@@ -151,3 +151,18 @@ func TestRune(t *testing.T) {
 		}
 	}
 }
+
+func TestAscii(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"gewoon", "gewoon"},
+		{"em—dash", "em-dash"},
+		{"‘quo’", "'quo'"},
+		{"…", "..."},
+		{"smörgås", "sm?rg?s"}, // één ? per teken, niet per byte
+	}
+	for _, c := range cases {
+		if got := ascii(c.in); got != c.want {
+			t.Errorf("ascii(%q) = %q, wil %q", c.in, got, c.want)
+		}
+	}
+}

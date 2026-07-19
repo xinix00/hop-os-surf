@@ -213,8 +213,56 @@ func blockMargin(tag string, scale int) int {
 	}
 }
 
+// ascii vouwt tekst naar het 8x8-font (ASCII): typografische tekens naar
+// hun ASCII-neef, elk ander niet-ASCII-teken naar één '?' — zonder dit
+// werd een em-dash drie '?'-en (één per UTF-8-byte).
+func ascii(s string) string {
+	i := 0
+	for ; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			break
+		}
+	}
+	if i == len(s) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	b.WriteString(s[:i])
+	for _, r := range s[i:] {
+		switch r {
+		case '–', '—', '−': // – — −
+			b.WriteByte('-')
+		case '‘', '’': // ‘ ’
+			b.WriteByte('\'')
+		case '“', '”': // “ ”
+			b.WriteByte('"')
+		case ' ':
+			b.WriteByte(' ')
+		case '•', '·': // • ·
+			b.WriteByte('-')
+		case '…': // …
+			b.WriteString("...")
+		case '×': // ×
+			b.WriteByte('x')
+		case '©': // ©
+			b.WriteString("(c)")
+		case '→': // →
+			b.WriteString("->")
+		default:
+			if r < 0x80 {
+				b.WriteRune(r)
+			} else {
+				b.WriteByte('?')
+			}
+		}
+	}
+	return b.String()
+}
+
 // word plaatst één woord, met wrap op de paginabreedte.
 func (l *layouter) word(w string, st style) {
+	w = ascii(w)
 	l.flushGap()
 	ww := pixel.StringWidth(w, st.scale)
 	sp := 0
@@ -246,7 +294,7 @@ func (l *layouter) word(w string, st style) {
 // preText behoudt regels en spaties; te lange regels lopen het beeld uit
 // (geen wrap — zo doet een terminal het ook).
 func (l *layouter) preText(txt string, st style) {
-	for i, line := range strings.Split(strings.ReplaceAll(txt, "\t", "    "), "\n") {
+	for i, line := range strings.Split(strings.ReplaceAll(ascii(txt), "\t", "    "), "\n") {
 		if i > 0 {
 			l.breakLine()
 		}
