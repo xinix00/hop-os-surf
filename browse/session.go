@@ -6,11 +6,19 @@
 package browse
 
 import (
+	"bytes"
+	"image"
+	_ "image/gif" // decoders voor <img>: puur Go, dus ook op tamago
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	gost "github.com/gost-dom/browser"
+	"github.com/gost-dom/browser/dom"
 	"github.com/gost-dom/browser/html"
 )
 
@@ -30,8 +38,9 @@ pixels op het 8x8-font. Geen CSS, geen scripts &mdash; wel <i>leesbaar</i>.</p>
 
 // Session is één browservenster.
 type Session struct {
-	b   *gost.Browser
-	win html.Window
+	b    *gost.Browser
+	win  html.Window
+	imgs map[string]image.Image // gedecodeerde <img>'s van de huidige pagina, op raw src
 }
 
 // NewSession start een venster op de ingebouwde startpagina. Het netwerk
@@ -79,6 +88,11 @@ func (netProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out.Header = r.Header.Clone()
+	if out.Header.Get("User-Agent") == "" {
+		// Wikipedia c.s. weigeren anonieme clients (403); wees gewoon wie
+		// we zijn.
+		out.Header.Set("User-Agent", "surf/0.1 (HopOS; gost-dom)")
+	}
 	resp, err := netClient.Do(out)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -116,13 +130,99 @@ func (s *Session) Go(addr string) error {
 	if !hasScheme(addr) {
 		addr = "http://" + addr
 	}
-	return s.win.Navigate(addr)
+	err := s.win.Navigate(addr)
+	if err == nil {
+		s.loadImages()
+	}
+	return err
 }
 
 // Follow navigeert naar een aangeklikte href, onaangeroerd: gost-dom lost
 // relatieve paden ("/x", "page2.html", "#anker") tegen de huidige pagina op.
 func (s *Session) Follow(href string) error {
-	return s.win.Navigate(href)
+	err := s.win.Navigate(href)
+	if err == nil {
+		s.loadImages()
+	}
+	return err
+}
+
+// Grenzen voor het afbeeldingen laden: dit draait straks op bare metal, en
+// een pagina vol foto's mag de heap niet opblazen. Boven de kaders → alt-
+// tekst, net als bij een laadfout.
+const (
+	imgMaxCount = 24      // per pagina
+	imgMaxBytes = 4 << 20 // per afbeelding, over de lijn
+	imgMaxDim   = 2048    // px, per zijde (2048² RGBA = 16MB gedecodeerd)
+)
+
+// loadImages haalt de <img src>'s van de huidige pagina op en decodeert ze,
+// gesleuteld op het rauwe src-attribuut (waar de layout ze op terugvindt).
+// Fouten zijn per afbeelding en stil: de layout valt terug op de alt-tekst.
+// Draait in de nav-goroutine, ná Navigate — de event-lus merkt er niets van.
+func (s *Session) loadImages() {
+	s.imgs = nil
+	base, err := url.Parse(s.win.Location().Href())
+	if err != nil {
+		return
+	}
+	seen := map[string]bool{}
+	var walk func(n dom.Node)
+	walk = func(n dom.Node) {
+		if len(seen) >= imgMaxCount {
+			return
+		}
+		if el, ok := n.(dom.Element); ok && strings.EqualFold(el.TagName(), "img") {
+			if src, _ := el.GetAttribute("src"); src != "" && !seen[src] {
+				seen[src] = true
+				if m := s.fetchImage(base, src); m != nil {
+					if s.imgs == nil {
+						s.imgs = map[string]image.Image{}
+					}
+					s.imgs[src] = m
+				}
+			}
+		}
+		for c := n.FirstChild(); c != nil; c = c.NextSibling() {
+			walk(c)
+		}
+	}
+	if body := s.win.Document().Body(); body != nil {
+		walk(body)
+	}
+}
+
+// fetchImage haalt één afbeelding op (src opgelost tegen base) en decodeert
+// hem; nil bij elke vorm van pech of buiten de kaders.
+func (s *Session) fetchImage(base *url.URL, src string) image.Image {
+	ref, err := url.Parse(src)
+	if err != nil {
+		return nil
+	}
+	resp, err := s.b.Client.Get(base.ResolveReference(ref).String())
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	// Eerst begrensd binnenhalen, dan op de bytes DecodeConfig → Decode:
+	// zo kost een te groot plaatje nooit meer dan imgMaxBytes.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, imgMaxBytes))
+	if err != nil {
+		return nil
+	}
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || cfg.Width < 1 || cfg.Height < 1 ||
+		cfg.Width > imgMaxDim || cfg.Height > imgMaxDim {
+		return nil
+	}
+	m, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil
+	}
+	return m
 }
 
 // URL is het adres van de huidige pagina (voor de adresbalk na navigatie).
@@ -130,9 +230,10 @@ func (s *Session) URL() string {
 	return s.win.Location().Href()
 }
 
-// Layout layout de huidige pagina voor deze breedte.
+// Layout layout de huidige pagina voor deze breedte, inclusief de bij de
+// navigatie opgehaalde afbeeldingen.
 func (s *Session) Layout(width int) Page {
-	return Layout(s.win.Document().Body(), width)
+	return LayoutWithImages(s.win.Document().Body(), width, s.imgs)
 }
 
 // hasScheme: "letters://" aan het begin. "host:7878" is géén scheme.

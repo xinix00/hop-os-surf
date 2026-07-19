@@ -1,7 +1,9 @@
 package browse
 
 import (
+	"bytes"
 	"image"
+	"image/png"
 	"net/http"
 	"strings"
 	"testing"
@@ -160,6 +162,81 @@ func TestRune(t *testing.T) {
 		if got := Rune(c.code, c.shift); got != c.want {
 			t.Errorf("Rune(%d, %v) = %q, wil %q", c.code, c.shift, got, c.want)
 		}
+	}
+}
+
+func TestAfbeeldingen(t *testing.T) {
+	// Een 40x20 rood PNG'tje en een 1000px-brede banner, uit de handler.
+	pngBytes := func(w, h int) []byte {
+		m := image.NewRGBA(image.Rect(0, 0, w, h))
+		for i := range m.Pix {
+			m.Pix[i] = 0xFF // effen; alpha ook
+		}
+		var buf bytes.Buffer
+		png.Encode(&buf, m)
+		return buf.Bytes()
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<html><body>
+<p>logo: <img src="/logo.png" alt="logo"> inline</p>
+<p><a href="/twee"><img src="banner.png" alt="banner"></a></p>
+<p><img src="/weg.png" alt="kapot"></p>
+</body></html>`))
+	})
+	mux.HandleFunc("/logo.png", func(w http.ResponseWriter, r *http.Request) {
+		w.Write(pngBytes(40, 20))
+	})
+	mux.HandleFunc("/banner.png", func(w http.ResponseWriter, r *http.Request) {
+		w.Write(pngBytes(1000, 100)) // breder dan de pagina → schalen
+	})
+
+	s := NewSessionHandler(mux)
+	if err := s.Go("example.com"); err != nil {
+		t.Fatalf("Go: %v", err)
+	}
+	p := s.Layout(480)
+
+	var logo, banner *Box
+	for i := range p.Boxes {
+		b := &p.Boxes[i]
+		switch {
+		case b.Img != nil && b.R.Dx() == 40:
+			logo = b
+		case b.Img != nil && b.R.Dx() > 40:
+			banner = b
+		}
+	}
+	if logo == nil {
+		t.Fatalf("logo.png niet als afbeelding gelayout: %+v", p.Boxes)
+	}
+	if logo.R.Dy() != 20 {
+		t.Fatalf("logo-maat klopt niet: %v", logo.R)
+	}
+	// Inline: "inline" staat erachter, op dezelfde regel als het logo.
+	if txt := find(p, "inline"); txt == nil || txt.R.Min.Y != logo.R.Min.Y || txt.R.Min.X <= logo.R.Max.X {
+		t.Fatalf("logo niet inline geplaatst: logo=%v tekst=%+v", logo.R, txt)
+	}
+	if banner == nil || banner.R.Dx() != 480-2*pad {
+		t.Fatalf("banner niet passend geschaald: %+v", banner)
+	}
+	if banner.R.Dy() != 100*(480-2*pad)/1000 {
+		t.Fatalf("banner niet proportioneel geschaald: %v", banner.R)
+	}
+	if banner.Href != "/twee" {
+		t.Fatalf("banner in <a> niet klikbaar: %+v", banner)
+	}
+	if kapot := find(p, "[kapot]"); kapot == nil {
+		t.Fatal("404-afbeelding viel niet terug op alt-tekst")
+	}
+
+	// En renderen: het pixelvlak van het logo hoort effen wit (0xFF) te zijn.
+	v := View{Page: p}
+	img := image.NewRGBA(image.Rect(0, 0, 480, 400))
+	v.Render(img)
+	at := img.RGBAAt(logo.R.Min.X+5, BarH+logo.R.Min.Y+5)
+	if at.R != 0xFF || at.G != 0xFF || at.B != 0xFF {
+		t.Fatalf("logo-pixels niet gerenderd: %v", at)
 	}
 }
 

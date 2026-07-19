@@ -10,6 +10,7 @@ package browse
 import (
 	"image"
 	"image/color"
+	"image/draw"
 	"strings"
 
 	"github.com/gost-dom/browser/dom"
@@ -44,15 +45,16 @@ const (
 	inset = 16 // inspringing per lijst/quote-niveau
 )
 
-// Box is één gelayoute tekstrun (of een <hr>-lijn) in documentcoördinaten:
-// (0,0) is de top van de pagina, los van scroll en adresbalk.
+// Box is één gelayoute tekstrun, afbeelding of <hr>-lijn in document-
+// coördinaten: (0,0) is de top van de pagina, los van scroll en adresbalk.
 type Box struct {
 	R     image.Rectangle
 	Text  string
 	Scale int
 	Col   color.RGBA
-	Href  string // niet-leeg: klikbaar (nog onopgeloste href uit de pagina)
-	Rule  bool   // <hr>: R vullen i.p.v. Text tekenen
+	Href  string      // niet-leeg: klikbaar (nog onopgeloste href uit de pagina)
+	Rule  bool        // <hr>: R vullen i.p.v. Text tekenen
+	Img   *image.RGBA // <img>: al geschaald naar R — teken i.p.v. Text
 }
 
 // Page is het layout-resultaat voor één breedte; bij een resize opnieuw
@@ -78,13 +80,22 @@ type layouter struct {
 	boxes []Box
 	space bool // er hoort witruimte vóór het volgende woord
 	gap   int  // opgespaarde blokmarge (collapsing): pas toe bij het volgende woord
+	imgs  map[string]image.Image
 }
 
 // Layout wandelt de DOM onder body en vouwt hem tot boxes voor deze
 // paginabreedte. Onbekende elementen erven gewoon door — een pagina met
 // <article> of <custom-tag> blijft leesbaar.
 func Layout(body dom.Node, width int) Page {
-	l := &layouter{width: width}
+	return LayoutWithImages(body, width, nil)
+}
+
+// LayoutWithImages is Layout met de opgehaalde afbeeldingen, gesleuteld op
+// het rauwe src-attribuut (Session lost de URL's op en haalt ze binnen —
+// layout blijft puur en synchroon). Een <img> zonder plaatje valt terug op
+// zijn alt-tekst.
+func LayoutWithImages(body dom.Node, width int, imgs map[string]image.Image) Page {
+	l := &layouter{width: width, imgs: imgs}
 	if body != nil {
 		l.walk(body, style{scale: 1, col: colText})
 	}
@@ -161,6 +172,10 @@ func (l *layouter) element(el dom.Element, st style) {
 		l.blockGap(lead)
 		return
 	case "img":
+		if src, _ := el.GetAttribute("src"); l.imgs[src] != nil {
+			l.image(l.imgs[src], st)
+			return
+		}
 		alt, _ := el.GetAttribute("alt")
 		if alt = strings.TrimSpace(alt); alt == "" {
 			alt = "img"
@@ -295,6 +310,65 @@ func (l *layouter) word(w string, st style) {
 	l.space = false
 }
 
+// image plaatst een afbeelding in de flow, als een (groot) woord: past hij
+// nog op de regel dan inline, anders op een nieuwe. Breder dan de pagina →
+// proportioneel verkleind; het schalen gebeurt hier (één keer per layout),
+// renderen is daarna een kale draw.Draw.
+func (l *layouter) image(m image.Image, st style) {
+	l.flushGap()
+	w, h := m.Bounds().Dx(), m.Bounds().Dy()
+	if w < 1 || h < 1 {
+		return
+	}
+	maxW := l.width - 2*pad - st.indent
+	if maxW < 8 {
+		maxW = 8
+	}
+	if w > maxW {
+		h = h * maxW / w
+		if h < 1 {
+			h = 1
+		}
+		w = maxW
+	}
+	sp := 0
+	if l.space && l.x > 0 {
+		sp = 8 * st.scale
+	}
+	if l.x > 0 && l.x+sp+w > l.width-pad {
+		l.breakLine()
+		sp = 0
+	}
+	if l.x == 0 {
+		l.x = pad + st.indent
+	}
+	x := l.x + sp
+	l.boxes = append(l.boxes, Box{
+		R:    image.Rect(x, l.y, x+w, l.y+h),
+		Href: st.href,
+		Img:  scaleTo(m, w, h),
+	})
+	l.x = x + w
+	if h > l.lineH {
+		l.lineH = h
+	}
+	l.space = false
+}
+
+// scaleTo schaalt src naar w×h met nearest-neighbor: geen extra dependency,
+// en op het 8x8-font-scherm is zachte interpolatie toch niet te zien.
+func scaleTo(src image.Image, w, h int) *image.RGBA {
+	dst := image.NewRGBA(image.Rect(0, 0, w, h))
+	sb := src.Bounds()
+	for y := 0; y < h; y++ {
+		sy := sb.Min.Y + y*sb.Dy()/h
+		for x := 0; x < w; x++ {
+			dst.Set(x, y, src.At(sb.Min.X+x*sb.Dx()/w, sy))
+		}
+	}
+	return dst
+}
+
 // preText behoudt regels en spaties; te lange regels lopen het beeld uit
 // (geen wrap — zo doet een terminal het ook).
 func (l *layouter) preText(txt string, st style) {
@@ -360,7 +434,7 @@ func merge(in []Box) []Box {
 	for _, b := range in {
 		if n := len(out); n > 0 {
 			p := &out[n-1]
-			if !p.Rule && !b.Rule &&
+			if !p.Rule && !b.Rule && p.Img == nil && b.Img == nil &&
 				p.Scale == b.Scale && p.Col == b.Col && p.Href == b.Href &&
 				p.R.Min.Y == b.R.Min.Y && p.R.Max.X+8*p.Scale == b.R.Min.X {
 				p.Text += " " + b.Text
@@ -403,6 +477,12 @@ func (v *View) Render(img *image.RGBA) {
 		}
 		if bx.Rule {
 			pixel.Fill(img, image.Rect(b.Min.X+bx.R.Min.X, top, b.Min.X+bx.R.Max.X, bot), bx.Col)
+			continue
+		}
+		if bx.Img != nil {
+			// Over, niet Src: PNG-transparantie hoort het paginawit te tonen.
+			r := image.Rect(b.Min.X+bx.R.Min.X, top, b.Min.X+bx.R.Max.X, bot)
+			draw.Draw(img, r, bx.Img, bx.Img.Bounds().Min, draw.Over)
 			continue
 		}
 		pixel.DrawString(img, b.Min.X+bx.R.Min.X, top, bx.Scale, bx.Col, bx.Text)
