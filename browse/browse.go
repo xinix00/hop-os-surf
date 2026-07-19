@@ -35,8 +35,10 @@ var (
 	colBold   = color.RGBA{0x00, 0x00, 0x00, 0xFF}
 	colLink   = color.RGBA{0x1A, 0x4F, 0xC4, 0xFF}
 	colCode   = color.RGBA{0x6A, 0x2A, 0x8A, 0xFF}
-	colRule   = color.RGBA{0xB0, 0xB0, 0xB8, 0xFF}
-	colErrBar = color.RGBA{0xFF, 0x8A, 0x7A, 0xFF} // fouttekst op de donkere statusbalk
+	colRule     = color.RGBA{0xB0, 0xB0, 0xB8, 0xFF}
+	colErrBar   = color.RGBA{0xFF, 0x8A, 0x7A, 0xFF} // fouttekst op de donkere statusbalk
+	colScrTrack = color.RGBA{0xE4, 0xE4, 0xE0, 0xFF}
+	colScrThumb = color.RGBA{0x8A, 0x96, 0xB0, 0xFF}
 )
 
 const (
@@ -492,6 +494,26 @@ func (v *View) Render(img *image.RGBA) {
 	}
 	v.RenderBar(img)
 	v.RenderStatus(img)
+	v.renderScrollbar(img)
+}
+
+// renderScrollbar tekent een smalle positie-indicator aan de rechterrand —
+// alleen als de pagina langer is dan de viewport. Geen klik-doel (v0),
+// puur "waar ben ik": scrollen gaat met wiel of toetsen.
+func (v *View) renderScrollbar(img *image.RGBA) {
+	b := img.Bounds()
+	viewH := b.Dy() - BarH - StatusH
+	if v.Page.Height <= viewH || viewH < 16 {
+		return
+	}
+	top, bot := b.Min.Y+BarH, b.Max.Y-StatusH
+	thumbH := viewH * viewH / v.Page.Height
+	if thumbH < 8 {
+		thumbH = 8
+	}
+	y := top + (viewH-thumbH)*v.Scroll/(v.Page.Height-viewH)
+	pixel.Fill(img, image.Rect(b.Max.X-4, top, b.Max.X, bot), colScrTrack)
+	pixel.Fill(img, image.Rect(b.Max.X-4, y, b.Max.X, y+thumbH), colScrThumb)
 }
 
 // RenderBar tekent alléén de adresbalk (voor het tik-pad: een strook van

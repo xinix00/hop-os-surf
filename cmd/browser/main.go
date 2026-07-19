@@ -144,6 +144,27 @@ func main() {
 						view.Addr = view.Addr[:len(view.Addr)-1]
 						redrawBar(win, &view, app.Logf)
 					}
+				case 38, 40, 33, 34, 32, 36, 35: // scroll-toetsen
+					_, h := win.Size()
+					page := h - browse.BarH - browse.StatusH - 24 // met overlap
+					var d int
+					switch ev.Code {
+					case 38: // pijl omhoog
+						d = -24
+					case 40: // pijl omlaag
+						d = 24
+					case 33: // PgUp
+						d = -page
+					case 34, 32: // PgDn; spatie doet wat hij in elke browser doet
+						d = page
+					case 36: // Home
+						d = -view.Scroll
+					case 35: // End
+						d = view.Page.Height
+					}
+					if view.ScrollBy(d, h) {
+						redraw()
+					}
 				default:
 					if r := browse.Rune(ev.Code, shift); r != 0 {
 						view.Addr += string(r)

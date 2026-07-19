@@ -137,6 +137,14 @@ func TestRenderEnScroll(t *testing.T) {
 	if img.RGBAAt(3, 120-StatusH+1) != colBar {
 		t.Fatalf("statusbalk niet getekend: %v", img.RGBAAt(3, 120-StatusH+1))
 	}
+	// Pagina langer dan de viewport → scrollindicator rechts; op max-scroll
+	// zit de duim onderaan de baan.
+	if got := img.RGBAAt(198, 120-StatusH-2); got != colScrThumb {
+		t.Fatalf("scrollduim niet onderaan: %v", got)
+	}
+	if got := img.RGBAAt(198, BarH+1); got != colScrTrack {
+		t.Fatalf("scrollbaan niet getekend bovenaan: %v", got)
+	}
 }
 
 func TestStartpagina(t *testing.T) {
