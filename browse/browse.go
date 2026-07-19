@@ -11,6 +11,7 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
+	"strconv"
 	"strings"
 
 	"github.com/gost-dom/browser/dom"
@@ -40,6 +41,9 @@ var (
 	colErrBar   = color.RGBA{0xFF, 0x8A, 0x7A, 0xFF} // fouttekst op de donkere statusbalk
 	colScrTrack = color.RGBA{0xE4, 0xE4, 0xE0, 0xFF}
 	colScrThumb = color.RGBA{0x8A, 0x96, 0xB0, 0xFF}
+	colFieldBG  = color.RGBA{0xFF, 0xFF, 0xFF, 0xFF} // invoerveld
+	colBtnFace  = color.RGBA{0xE2, 0xE6, 0xEE, 0xFF} // knop
+	colFocus    = color.RGBA{0x2D, 0x6C, 0xDF, 0xFF} // rand van het veld met focus
 )
 
 const (
@@ -58,15 +62,28 @@ type Box struct {
 	Href  string      // niet-leeg: klikbaar (nog onopgeloste href uit de pagina)
 	Rule  bool        // <hr>: R vullen i.p.v. Text tekenen
 	Img   *image.RGBA // <img>: al geschaald naar R — teken i.p.v. Text
+	Tile  *image.RGBA // background-image: herhaald over R (tegels — nooit een reuze-alloc)
 	Bold  bool        // pseudo-vet (dubbelgetekend)
-	BG    color.RGBA  // achtergrondvlak achter de run
+	BG    color.RGBA  // achtergrondvlak achter de run (of het blok)
 	HasBG bool
+	Field int // >0: invoerveld/knop — index+1 in Page.Fields
+}
+
+// Field is één formulierveld of -knop op de pagina. De waarde leeft in de
+// Session (overleeft re-layouts); Submit=true is een knop.
+type Field struct {
+	R      image.Rectangle // klik-doel in documentcoördinaten
+	Name   string
+	Value  string
+	Submit bool
+	node   dom.Node // het <input>-element: sleutel voor Session.Type/Submit
 }
 
 // Page is het layout-resultaat voor één breedte; bij een resize opnieuw
 // layouten (de WM bepaalt de maat, dus dit is de gewone gang van zaken).
 type Page struct {
 	Boxes  []Box
+	Fields []Field
 	Height int // documenthoogte in pixels (voor scroll-klemmen)
 }
 
@@ -90,12 +107,14 @@ type layouter struct {
 	x, y   int // x=0 betekent: nog niets op deze regel
 	lineH  int
 	boxes  []Box
+	fields []Field
 	space  bool // er hoort witruimte vóór het volgende woord
 	gap    int  // opgespaarde blokmarge (collapsing): pas toe bij het volgende woord
 	imgs   map[string]image.Image
 	styles map[dom.Node]props
-	line0  int  // index van de eerste box op de huidige regel (voor centreren)
-	center bool // deze regel centreren bij breakLine
+	edits  map[dom.Node]string // door de gebruiker ingetikte veldwaarden
+	line0  int                 // index van de eerste box op de huidige regel (voor centreren)
+	center bool                // deze regel centreren bij breakLine
 }
 
 // Layout wandelt de DOM onder body en vouwt hem tot boxes voor deze
@@ -110,19 +129,19 @@ func Layout(body dom.Node, width int) Page {
 // layout blijft puur en synchroon). Een <img> zonder plaatje valt terug op
 // zijn alt-tekst.
 func LayoutWithImages(body dom.Node, width int, imgs map[string]image.Image) Page {
-	return layoutStyled(body, width, imgs, nil)
+	return layoutStyled(body, width, imgs, nil, nil)
 }
 
 // layoutStyled is de volledige variant: mét de computed CSS-props uit
-// Session.loadStyles. Inline style=""-attributen werken altijd, ook
-// zonder die map.
-func layoutStyled(body dom.Node, width int, imgs map[string]image.Image, styles map[dom.Node]props) Page {
-	l := &layouter{width: width, imgs: imgs, styles: styles}
+// Session.loadStyles en de ingetikte veldwaarden. Inline style=""-
+// attributen werken altijd, ook zonder die map.
+func layoutStyled(body dom.Node, width int, imgs map[string]image.Image, styles map[dom.Node]props, edits map[dom.Node]string) Page {
+	l := &layouter{width: width, imgs: imgs, styles: styles, edits: edits}
 	if body != nil {
 		l.walk(body, style{scale: 1, col: colText})
 	}
 	l.breakLine()
-	return Page{Boxes: merge(l.boxes), Height: l.y}
+	return Page{Boxes: merge(l.boxes), Fields: l.fields, Height: l.y}
 }
 
 // blocks: elementen die een eigen regel (en marge) afdwingen.
@@ -232,6 +251,23 @@ func (l *layouter) element(el dom.Element, st style) {
 		l.word("["+alt+"]", style{scale: st.scale, col: colRule, href: st.href, indent: st.indent})
 		l.space = true
 		return
+	case "input":
+		l.input(el, st)
+		return
+	case "button":
+		label := strings.TrimSpace(ascii(el.TextContent()))
+		if label == "" {
+			label, _ = el.GetAttribute("value")
+		}
+		l.widget(el, label, true, st)
+		return
+	case "textarea":
+		val := el.TextContent()
+		if v, ok := l.edits[dom.Node(el)]; ok {
+			val = v
+		}
+		l.widget(el, val, false, st)
+		return
 	}
 
 	switch tag {
@@ -305,21 +341,49 @@ func (l *layouter) element(el dom.Element, st style) {
 	case "block", "list-item":
 		isBlock = !st.inline
 	}
-	childSt := st
+	// childInline: krijgen de kínderen een inline-context? (De childSt
+	// zelf wordt pas ná de CSS-toepassing gekopieerd — kinderen horen de
+	// gecascadeerde stijl te erven.)
+	childInline := st.inline
 	switch cp["display"] {
 	case "flex", "grid", "inline-flex":
-		childSt.inline = true
+		childInline = true
 	}
 	if tag == "nav" {
 		// UA-vooroordeel: een <nav> ís vrijwel altijd een menu — leg hem
 		// plat, ook zonder stylesheet (die staat vol properties die wij
 		// toch niet dragen).
-		childSt.inline = true
+		childInline = true
 	}
 
 	// Een blok dat inline gezet is (flex-kind, display:inline-li) krijgt
 	// lucht om zich heen in plaats van een regelbreuk.
 	inlined := blocks[tag] && !isBlock
+
+	// Blok-achtergrond: één vlak (of tegelpatroon) achter het hele blok —
+	// body-achtergrond wordt zo vanzelf de paginakleur. Het vlak gaat als
+	// placeholder de boxlijst in (paint-volgorde: onder de inhoud) en
+	// krijgt zijn rechthoek als de blokhoogte bekend is.
+	bgIdx := -1
+	var bgY0 int
+	if tile := l.imgs[cssURL(cp["background-image"])]; (isBlock || tag == "body") && (st.hasBG || tile != nil) {
+		l.breakLine()
+		l.flushGap()
+		bgIdx = len(l.boxes)
+		bgY0 = l.y
+		box := Box{BG: st.bg, HasBG: st.hasBG}
+		if tile != nil {
+			w, h := tile.Bounds().Dx(), tile.Bounds().Dy()
+			if w > 0 && h > 0 && w <= imgMaxDim && h <= imgMaxDim {
+				box.Tile = scaleTo(tile, w, h) // één RGBA-tegel, nooit een reuze-alloc
+			}
+		}
+		l.boxes = append(l.boxes, box)
+		st.hasBG = false // de kinderen liggen al óp het vlak: geen run-vulling meer nodig
+	}
+
+	childSt := st
+	childSt.inline = childInline
 
 	if isBlock {
 		l.blockGap(blockMargin(tag, st.scale))
@@ -340,6 +404,85 @@ func (l *layouter) element(el dom.Element, st style) {
 	if isBlock {
 		l.blockGap(blockMargin(tag, st.scale))
 	}
+	if bgIdx >= 0 {
+		l.breakLine()
+		x0, x1 := pad+st.indent-2, l.width-pad+2
+		if tag == "body" {
+			x0, x1 = 0, l.width
+		}
+		l.boxes[bgIdx].R = image.Rect(x0, bgY0-2, x1, l.y+2)
+	}
+}
+
+// input legt één <input> in de flow; hidden doet niet mee, knoppen en
+// tekstvelden worden widgets, checkbox/radio (v0) een kaal vinkje.
+func (l *layouter) input(el dom.Element, st style) {
+	typ, _ := el.GetAttribute("type")
+	typ = strings.ToLower(strings.TrimSpace(typ))
+	val, _ := el.GetAttribute("value")
+	if v, ok := l.edits[dom.Node(el)]; ok {
+		val = v
+	}
+	switch typ {
+	case "hidden":
+		return
+	case "submit", "button", "reset":
+		if val == "" {
+			val = "OK"
+		}
+		l.widget(el, val, true, st)
+	case "checkbox", "radio":
+		mark := "[ ]"
+		if _, ok := el.GetAttribute("checked"); ok {
+			mark = "[x]"
+		}
+		l.word(mark, st) // tonen wel, togglen (nog) niet
+		l.space = true
+	default: // text, search, email, url, ...
+		l.widget(el, val, false, st)
+	}
+}
+
+// widget plaatst een invoerveld of knop als box in de flow en registreert
+// hem als Field (het klik/tik-doel). Veldbreedte volgt het size-attribuut
+// (default 20 tekens), knopbreedte het label.
+func (l *layouter) widget(el dom.Element, val string, submit bool, st style) {
+	l.flushGap()
+	chars := 20
+	if submit {
+		chars = len(val) + 2
+	} else if v, ok := el.GetAttribute("size"); ok {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
+			chars = n
+		}
+	}
+	w := chars*8*st.scale + 8
+	if max := l.width - 2*pad - st.indent; w > max {
+		w = max
+	}
+	h := 8*st.scale + 8
+	sp := 0
+	if l.space && l.x > 0 {
+		sp = 8 * st.scale
+	}
+	if l.x > 0 && l.x+sp+w > l.width-pad {
+		l.breakLine()
+		sp = 0
+	}
+	if l.x == 0 {
+		l.x = pad + st.indent
+	}
+	x := l.x + sp
+	r := image.Rect(x, l.y, x+w, l.y+h)
+	name, _ := el.GetAttribute("name")
+	l.fields = append(l.fields, Field{R: r, Name: name, Value: val, Submit: submit, node: dom.Node(el)})
+	l.boxes = append(l.boxes, Box{R: r, Scale: st.scale, Field: len(l.fields)})
+	l.x = x + w
+	if h > l.lineH {
+		l.lineH = h
+	}
+	l.space = false
+	l.center = l.center || st.center
 }
 
 // blockMargin: koppen krijgen lucht naar rato van hun maat, lijstitems
@@ -574,6 +717,7 @@ func merge(in []Box) []Box {
 		if n := len(out); n > 0 {
 			p := &out[n-1]
 			if !p.Rule && !b.Rule && p.Img == nil && b.Img == nil &&
+				p.Field == 0 && b.Field == 0 && p.Tile == nil && b.Tile == nil &&
 				p.Scale == b.Scale && p.Col == b.Col && p.Href == b.Href &&
 				p.Bold == b.Bold && p.HasBG == b.HasBG && p.BG == b.BG &&
 				p.R.Min.Y == b.R.Min.Y && p.R.Max.X+8*p.Scale == b.R.Min.X {
@@ -600,6 +744,15 @@ type View struct {
 	Err    bool   // Status is een fout — kleur hem als zodanig
 	Page   Page
 	Scroll int
+	Focus  int // >0: Page.Fields[Focus-1] heeft de toetsen; 0 = de adresbalk
+}
+
+// Focused geeft het veld met focus, of nil.
+func (v *View) Focused() *Field {
+	if v.Focus > 0 && v.Focus <= len(v.Page.Fields) {
+		return &v.Page.Fields[v.Focus-1]
+	}
+	return nil
 }
 
 // Render tekent adresbalk + pagina + statusbalk over het hele beeld. De
@@ -623,6 +776,25 @@ func (v *View) Render(img *image.RGBA) {
 			// Over, niet Src: PNG-transparantie hoort het paginawit te tonen.
 			r := image.Rect(b.Min.X+bx.R.Min.X, top, b.Min.X+bx.R.Max.X, bot)
 			draw.Draw(img, r, bx.Img, bx.Img.Bounds().Min, draw.Over)
+			continue
+		}
+		if bx.Field > 0 {
+			v.renderField(img, &bx, top, bot)
+			continue
+		}
+		if bx.Tile != nil {
+			// Blok-achtergrond: eerst de kleur, dan het tegelpatroon.
+			r := image.Rect(b.Min.X+bx.R.Min.X, top, b.Min.X+bx.R.Max.X, bot)
+			if bx.HasBG {
+				pixel.Fill(img, r, bx.BG)
+			}
+			tw, th := bx.Tile.Bounds().Dx(), bx.Tile.Bounds().Dy()
+			for ty := r.Min.Y; ty < r.Max.Y; ty += th {
+				for tx := r.Min.X; tx < r.Max.X; tx += tw {
+					dst := image.Rect(tx, ty, tx+tw, ty+th).Intersect(r)
+					draw.Draw(img, dst, bx.Tile, bx.Tile.Bounds().Min, draw.Over)
+				}
+			}
 			continue
 		}
 		if bx.HasBG {
@@ -662,6 +834,34 @@ func (v *View) renderScrollbar(img *image.RGBA) {
 	y := top + (viewH-thumbH)*v.Scroll/(v.Page.Height-viewH)
 	pixel.Fill(img, image.Rect(b.Max.X-4, top, b.Max.X, bot), colScrTrack)
 	pixel.Fill(img, image.Rect(b.Max.X-4, y, b.Max.X, y+thumbH), colScrThumb)
+}
+
+// renderField tekent één invoerveld of knop (bx.Field is 1-based).
+func (v *View) renderField(img *image.RGBA, bx *Box, top, bot int) {
+	f := &v.Page.Fields[bx.Field-1]
+	b := img.Bounds()
+	r := image.Rect(b.Min.X+bx.R.Min.X, top, b.Min.X+bx.R.Max.X, bot)
+	face, edge := colFieldBG, colRule
+	if f.Submit {
+		face = colBtnFace
+	}
+	if v.Focus == bx.Field {
+		edge = colFocus
+	}
+	pixel.Fill(img, r, face)
+	pixel.Outline(img, r, edge)
+	txt := ascii(f.Value)
+	if v.Focus == bx.Field && !f.Submit {
+		txt += "_"
+	}
+	if max := (r.Dx() - 8) / (8 * bx.Scale); len(txt) > max && max > 0 {
+		txt = txt[len(txt)-max:] // het einde in beeld: daar wordt getikt
+	}
+	if f.Submit {
+		pixel.DrawStringCentered(img, r, bx.Scale, colText, txt)
+	} else {
+		pixel.DrawString(img, r.Min.X+4, r.Min.Y+(r.Dy()-8*bx.Scale)/2, bx.Scale, colText, txt)
+	}
 }
 
 // RenderBar tekent alléén de adresbalk (voor het tik-pad: een strook van
@@ -720,6 +920,21 @@ func (v *View) Hit(x, y, viewH int) string {
 		}
 	}
 	return ""
+}
+
+// HitField geeft het veld (1-based, voor View.Focus) onder een klik; 0 als
+// daar geen veld is.
+func (v *View) HitField(x, y, viewH int) int {
+	if y < BarH || y >= viewH-StatusH {
+		return 0
+	}
+	p := image.Pt(x, y-BarH+v.Scroll)
+	for i := range v.Page.Fields {
+		if p.In(v.Page.Fields[i].R) {
+			return i + 1
+		}
+	}
+	return 0
 }
 
 // ScrollBy verschuift en klemt de scrollpositie voor deze viewporthoogte;

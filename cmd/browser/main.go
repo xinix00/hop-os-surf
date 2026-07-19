@@ -92,6 +92,7 @@ func main() {
 				app.Logf("browser: %v", err)
 			} else {
 				view.Scroll = 0
+				view.Focus = 0 // veld-indexen horen bij de oude pagina
 				view.Status, view.Err = fmt.Sprintf("ok (%dms) %s", ms, sess.URL()), false
 			}
 			view.Addr = sess.URL()
@@ -121,6 +122,22 @@ func main() {
 
 			case ev.Kind == surf.InputButton && ev.Value == 1:
 				_, h := win.Size()
+				// Velden eerst: een knop verstuurt het formulier, een
+				// tekstveld pakt de focus (en daarmee de toetsen).
+				if fi := view.HitField(int(ev.X), int(ev.Y), h); fi > 0 {
+					f := &view.Page.Fields[fi-1]
+					if f.Submit {
+						startNav("submit", func() error { return sess.Submit(f) })
+					} else if view.Focus != fi {
+						view.Focus = fi
+						redraw()
+					}
+					continue
+				}
+				if view.Focus != 0 { // klik naast de velden: focus terug naar de adresbalk
+					view.Focus = 0
+					redraw()
+				}
 				href := view.Hit(int(ev.X), int(ev.Y), h)
 				if href == "" {
 					continue
@@ -135,6 +152,33 @@ func main() {
 				if ev.Value != 1 {
 					continue
 				}
+				// Een veld met focus krijgt de toetsen (Escape geeft ze
+				// terug aan de adresbalk); spatie tikt daar een spatie in
+				// plaats van te scrollen.
+				if f := view.Focused(); f != nil && !navBusy {
+					switch ev.Code {
+					case 27: // Escape
+						view.Focus = 0
+						redraw()
+					case 13: // Enter: verstuur het formulier
+						startNav("submit", func() error { return sess.Submit(f) })
+					case 8:
+						sess.Type(f, 0, true)
+						redraw()
+					case 32:
+						sess.Type(f, ' ', false)
+						redraw()
+					default:
+						if r := browse.Rune(ev.Code, shift); r != 0 {
+							sess.Type(f, r, false)
+							redraw()
+						} else {
+							goto scroll // pijltjes/PgUp blijven scrollen
+						}
+					}
+					continue
+				}
+			scroll:
 				switch ev.Code {
 				case 13: // Enter: laad wat er in de balk staat
 					addr := view.Addr

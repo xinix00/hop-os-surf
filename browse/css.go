@@ -21,9 +21,12 @@ type props map[string]string
 // parsen weggegooid — het gros van echte stylesheets is layout-junk, en
 // elke overgebleven regel kost straks een QuerySelectorAll.
 func supportedProp(p string) bool {
+	if strings.HasPrefix(p, "--") {
+		return true // custom property: voer voor var()-resolutie
+	}
 	switch p {
 	case "display", "visibility", "color", "background-color", "background",
-		"font-weight", "font-size", "text-align":
+		"background-image", "font-weight", "font-size", "text-align":
 		return true
 	}
 	return false
@@ -111,18 +114,79 @@ func parseDecls(s string) props {
 		if val == "" || !supportedProp(prop) {
 			continue
 		}
-		if prop == "background" {
-			if _, ok := cssColor(val); !ok {
-				continue
-			}
-			prop = "background-color"
-		}
 		if p == nil {
 			p = props{}
+		}
+		if prop == "background" {
+			// Shorthand uit elkaar trekken: een kleur-token wordt
+			// background-color, een url(...) wordt background-image.
+			for _, tok := range strings.Fields(val) {
+				if _, ok := cssColor(tok); ok {
+					p["background-color"] = tok
+				}
+			}
+			if u := cssURL(val); u != "" {
+				p["background-image"] = "url(" + u + ")"
+			}
+			// var(--x) als hele waarde: bewaren; na var-resolutie wordt het
+			// alsnog een kleur (of valt het stil weg).
+			if strings.HasPrefix(val, "var(") {
+				p["background-color"] = val
+			}
+			continue
 		}
 		p[prop] = val
 	}
 	return p
+}
+
+// cssURL haalt de url uit een url(...)-waarde; "" als die er niet is.
+// data:-URI's doen niet mee (base64-decoderen is een andere klus).
+func cssURL(v string) string {
+	i := strings.Index(v, "url(")
+	if i < 0 {
+		return ""
+	}
+	rest := v[i+4:]
+	j := strings.IndexByte(rest, ')')
+	if j < 0 {
+		return ""
+	}
+	u := strings.Trim(strings.TrimSpace(rest[:j]), `"'`)
+	if u == "" || strings.HasPrefix(u, "data:") {
+		return ""
+	}
+	return u
+}
+
+// resolveVars vervangt var(--x) en var(--x, fallback) door de waarde uit
+// vars; een paar rondes diep, want variabelen verwijzen graag naar elkaar
+// (gethop.org: --acc → --leaf). Onoplosbaar → lege string (de property
+// valt dan stil weg — precies wat je wilt).
+func resolveVars(v string, vars map[string]string) string {
+	for depth := 0; depth < 4 && strings.Contains(v, "var("); depth++ {
+		i := strings.Index(v, "var(")
+		rest := v[i+4:]
+		j := strings.IndexByte(rest, ')')
+		if j < 0 {
+			return ""
+		}
+		inner := rest[:j]
+		name, fallback := inner, ""
+		if c := strings.IndexByte(inner, ','); c >= 0 {
+			name, fallback = inner[:c], strings.TrimSpace(inner[c+1:])
+		}
+		val, ok := vars[strings.TrimSpace(name)]
+		if !ok {
+			val = fallback
+		}
+		v = v[:i] + val + v[i+4+j+1:]
+		v = strings.TrimSpace(v)
+	}
+	if strings.Contains(v, "var(") {
+		return ""
+	}
+	return v
 }
 
 func stripComments(s string) string {

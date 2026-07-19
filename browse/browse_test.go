@@ -362,6 +362,112 @@ ul.inl li { display: inline; }
 	}
 }
 
+func TestFormulierZoalsGoogle(t *testing.T) {
+	var gotQuery string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<html><body>
+<form action="/search" name="f">
+<input value="nl" name="hl" type="hidden">
+<input name="q" size="30" value="">
+<input value="Zoeken" name="btnG" type="submit">
+</form></body></html>`))
+	})
+	mux.HandleFunc("/search", func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Write([]byte(`<html><body><p>resultaten voor ` + r.URL.Query().Get("q") + `</p></body></html>`))
+	})
+
+	s := NewSessionHandler(mux)
+	if err := s.Go("example.com"); err != nil {
+		t.Fatalf("Go: %v", err)
+	}
+	p := s.Layout(480)
+	if len(p.Fields) != 2 { // q + knop; hidden telt niet mee
+		t.Fatalf("wil 2 velden, kreeg %d: %+v", len(p.Fields), p.Fields)
+	}
+	veld, knop := &p.Fields[0], &p.Fields[1]
+	if veld.Submit || !knop.Submit || knop.Value != "Zoeken" {
+		t.Fatalf("veld/knop verwisseld: %+v", p.Fields)
+	}
+
+	// Klik het veld aan via de View, tik "hop os" en Enter.
+	v := View{Page: p}
+	if fi := v.HitField(veld.R.Min.X+2, veld.R.Min.Y+BarH+2, 10000); fi != 1 {
+		t.Fatalf("HitField op het veld gaf %d", fi)
+	}
+	for _, ch := range []byte("hop os") {
+		s.Type(veld, ch, false)
+	}
+	s.Type(veld, 'x', false)
+	s.Type(veld, 0, true) // backspace haalt de x weer weg
+	if veld.Value != "hop os" {
+		t.Fatalf("veldwaarde na tikken: %q", veld.Value)
+	}
+	// De waarde overleeft een re-layout (resize).
+	if p2 := s.Layout(320); p2.Fields[0].Value != "hop os" {
+		t.Fatalf("veldwaarde na re-layout: %q", p2.Fields[0].Value)
+	}
+
+	if err := s.Submit(veld); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if !strings.Contains(gotQuery, "q=hop+os") || !strings.Contains(gotQuery, "hl=nl") {
+		t.Fatalf("query mist velden: %q", gotQuery)
+	}
+	if strings.Contains(gotQuery, "btnG") {
+		t.Fatalf("niet-aangeklikte submit-knop hoort niet mee: %q", gotQuery)
+	}
+	if find(s.Layout(480), "resultaten voor hop os") == nil {
+		t.Fatal("zoekresultaat niet geland")
+	}
+}
+
+func TestVarsEnBlokAchtergrond(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<html><head><style>
+:root { --bg: #101418; --acc: var(--leaf); --leaf: #39b56a; }
+body { background: var(--bg); color: white; }
+.door { background: #1c2430; }
+</style></head><body>
+<div class="door"><p>HopOS</p></div>
+</body></html>`))
+	})
+	s := NewSessionHandler(mux)
+	if err := s.Go("example.com"); err != nil {
+		t.Fatalf("Go: %v", err)
+	}
+	p := s.Layout(480)
+
+	// Body-achtergrond: een vlak over de volle breedte, bovenaan.
+	var bodyBG, doorBG *Box
+	for i := range p.Boxes {
+		b := &p.Boxes[i]
+		if b.HasBG && b.Text == "" && !b.Rule && b.Field == 0 {
+			if b.R.Min.X == 0 && b.R.Dx() == 480 {
+				bodyBG = b
+			} else if b.BG == (color.RGBA{0x1C, 0x24, 0x30, 0xFF}) {
+				doorBG = b
+			}
+		}
+	}
+	if bodyBG == nil || bodyBG.BG != (color.RGBA{0x10, 0x14, 0x18, 0xFF}) {
+		t.Fatalf("body-achtergrond (via var(--bg)) niet gevonden: %+v", p.Boxes)
+	}
+	if doorBG == nil {
+		t.Fatalf(".door-blokachtergrond niet gevonden")
+	}
+	txt := find(p, "HopOS")
+	if txt == nil || txt.Col != (color.RGBA{0xFF, 0xFF, 0xFF, 0xFF}) {
+		t.Fatalf("witte tekst op donkere pagina: %+v", txt)
+	}
+	// Het tekstvlak ligt bínnen het door-vlak, en het door-vlak binnen de body.
+	if !txt.R.In(doorBG.R) || !doorBG.R.In(bodyBG.R) {
+		t.Fatalf("nesting klopt niet: txt=%v door=%v body=%v", txt.R, doorBG.R, bodyBG.R)
+	}
+}
+
 func TestParseCSS(t *testing.T) {
 	rules := parseCSS(`a { color: red; margin: 4px } /* junk */ b,i{font-weight:700}
 @media screen { .x { color: blue } } .leeg { margin: 0 }`, 0)

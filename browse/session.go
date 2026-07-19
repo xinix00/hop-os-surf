@@ -48,6 +48,7 @@ type Session struct {
 	win    html.Window
 	imgs   map[string]image.Image // gedecodeerde <img>'s van de huidige pagina, op raw src
 	styles map[dom.Node]props     // computed CSS-props per element (zie loadStyles)
+	edits  map[dom.Node]string    // ingetikte veldwaarden (overleven een re-layout)
 	nerr   *netErr                // laatste transportfout uit de netProxy (nil bij handler-tests)
 }
 
@@ -216,6 +217,7 @@ func (s *Session) Go(addr string) error {
 	}
 	err := s.win.Navigate(addr)
 	if err == nil {
+		s.edits = nil // nieuwe pagina, verse velden
 		s.loadStyles()
 		s.loadImages()
 	}
@@ -227,10 +229,104 @@ func (s *Session) Go(addr string) error {
 func (s *Session) Follow(href string) error {
 	err := s.win.Navigate(href)
 	if err == nil {
+		s.edits = nil
 		s.loadStyles()
 		s.loadImages()
 	}
 	return s.explain(err)
+}
+
+// --- formulieren ------------------------------------------------------------
+
+// Type verwerkt een toets in een invoerveld: een teken erbij, of met bs
+// een teken eraf. De waarde leeft in de sessie en overleeft re-layouts.
+func (s *Session) Type(f *Field, ch byte, bs bool) {
+	if f == nil || f.node == nil {
+		return
+	}
+	if s.edits == nil {
+		s.edits = map[dom.Node]string{}
+	}
+	v, ok := s.edits[f.node]
+	if !ok {
+		v = f.Value
+	}
+	if bs {
+		if v != "" {
+			v = v[:len(v)-1]
+		}
+	} else {
+		v += string(ch)
+	}
+	s.edits[f.node] = v
+	f.Value = v
+}
+
+// Submit verstuurt het formulier waar dit veld in zit: alle benoemde
+// velden als GET-query op de action-URL (POST is een andere klus — de
+// zoekmachines van deze wereld zijn GET). De aangeklikte submit-knop doet
+// zijn eigen naam mee, die van de andere knoppen niet.
+func (s *Session) Submit(f *Field) error {
+	if f == nil || f.node == nil {
+		return nil
+	}
+	form := ancestorForm(f.node)
+	if form == nil {
+		return nil
+	}
+	if m, _ := form.GetAttribute("method"); strings.EqualFold(strings.TrimSpace(m), "post") {
+		return errors.New("POST-formulier: nog niet gedragen")
+	}
+	q := url.Values{}
+	var collect func(n dom.Node)
+	collect = func(n dom.Node) {
+		if el, ok := n.(dom.Element); ok && strings.EqualFold(el.TagName(), "input") {
+			name, _ := el.GetAttribute("name")
+			typ, _ := el.GetAttribute("type")
+			typ = strings.ToLower(typ)
+			val, _ := el.GetAttribute("value")
+			if v, ok := s.edits[n]; ok {
+				val = v
+			}
+			switch {
+			case name == "":
+			case typ == "submit" || typ == "button" || typ == "image":
+				if n == f.node {
+					q.Set(name, val)
+				}
+			case typ == "checkbox" || typ == "radio":
+				if _, checked := el.GetAttribute("checked"); checked {
+					q.Set(name, val)
+				}
+			default: // text, search, hidden, ...
+				q.Set(name, val)
+			}
+		}
+		for c := n.FirstChild(); c != nil; c = c.NextSibling() {
+			collect(c)
+		}
+	}
+	for c := form.FirstChild(); c != nil; c = c.NextSibling() {
+		collect(c)
+	}
+	action, _ := form.GetAttribute("action")
+	if action == "" {
+		action = s.URL()
+	}
+	if i := strings.IndexByte(action, '?'); i >= 0 {
+		action = action[:i]
+	}
+	return s.Follow(action + "?" + q.Encode())
+}
+
+// ancestorForm zoekt het omvattende <form>-element.
+func ancestorForm(n dom.Node) dom.Element {
+	for p := n.ParentElement(); p != nil; p = p.ParentElement() {
+		if strings.EqualFold(p.TagName(), "form") {
+			return p
+		}
+	}
+	return nil
 }
 
 // Grenzen voor het CSS laden en matchen (zelfde gedachte als bij de
@@ -289,6 +385,7 @@ func (s *Session) loadStyles() {
 		return rules[i].seq < rules[j].seq
 	})
 	styles := map[dom.Node]props{}
+	vars := map[string]string{} // custom properties, doc-globaal (versimpeld: geen scoping)
 	deadline := time.Now().Add(cssBudget)
 	for _, r := range rules {
 		if time.Now().After(deadline) {
@@ -298,6 +395,7 @@ func (s *Session) loadStyles() {
 		if err != nil || nodes == nil {
 			continue // selector die gost-dom niet kent: regel vervalt
 		}
+		matched := nodes.Length() > 0
 		for i := 0; i < nodes.Length(); i++ {
 			n := nodes.Item(i)
 			p := styles[n]
@@ -307,6 +405,27 @@ func (s *Session) loadStyles() {
 			}
 			for k, v := range r.decls {
 				p[k] = v
+			}
+		}
+		if matched {
+			// --vars van geraakte regels (:root, body, body.pg-x) gelden
+			// doc-globaal in cascade-volgorde — genoeg voor het gangbare
+			// "thema op de body"-patroon (gethop.org).
+			for k, v := range r.decls {
+				if strings.HasPrefix(k, "--") {
+					vars[k] = v
+				}
+			}
+		}
+	}
+	// var(--x) overal oplossen, ook in de vars zelf (--acc: var(--leaf)).
+	for k, v := range vars {
+		vars[k] = resolveVars(v, vars)
+	}
+	for _, p := range styles {
+		for k, v := range p {
+			if strings.Contains(v, "var(") {
+				p[k] = resolveVars(v, vars)
 			}
 		}
 	}
@@ -354,19 +473,34 @@ func (s *Session) loadImages() {
 		return
 	}
 	seen := map[string]bool{}
-	var walk func(n dom.Node)
-	walk = func(n dom.Node) {
-		if len(seen) >= imgMaxCount {
+	load := func(src string) {
+		if src == "" || seen[src] || len(seen) >= imgMaxCount {
 			return
 		}
-		if el, ok := n.(dom.Element); ok && strings.EqualFold(el.TagName(), "img") {
-			if src, _ := el.GetAttribute("src"); src != "" && !seen[src] {
-				seen[src] = true
-				if m := s.fetchImage(base, src); m != nil {
-					if s.imgs == nil {
-						s.imgs = map[string]image.Image{}
-					}
-					s.imgs[src] = m
+		seen[src] = true
+		if m := s.fetchImage(base, src); m != nil {
+			if s.imgs == nil {
+				s.imgs = map[string]image.Image{}
+			}
+			s.imgs[src] = m
+		}
+	}
+	var walk func(n dom.Node)
+	walk = func(n dom.Node) {
+		if el, ok := n.(dom.Element); ok {
+			if strings.EqualFold(el.TagName(), "img") {
+				src, _ := el.GetAttribute("src")
+				load(src)
+			}
+			// background-image uit de stylesheets of een inline style —
+			// de layout zoekt hem straks op dezelfde sleutel (de rauwe
+			// url uit de css) terug.
+			if v, ok := s.styles[dom.Node(el)]["background-image"]; ok {
+				load(cssURL(v))
+			}
+			if inline, ok := el.GetAttribute("style"); ok {
+				if v, ok := parseDecls(inline)["background-image"]; ok {
+					load(cssURL(v))
 				}
 			}
 		}
@@ -418,9 +552,9 @@ func (s *Session) URL() string {
 }
 
 // Layout layout de huidige pagina voor deze breedte, inclusief de bij de
-// navigatie opgehaalde afbeeldingen en CSS-props.
+// navigatie opgehaalde afbeeldingen, CSS-props en ingetikte veldwaarden.
 func (s *Session) Layout(width int) Page {
-	return layoutStyled(s.win.Document().Body(), width, s.imgs, s.styles)
+	return layoutStyled(s.win.Document().Body(), width, s.imgs, s.styles, s.edits)
 }
 
 // hasScheme: "letters://" aan het begin. "host:7878" is géén scheme.
