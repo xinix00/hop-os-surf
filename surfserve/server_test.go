@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xinix00/hop-os-surf/window"
 	"github.com/xinix00/hop-os-surf/compositor"
 	"github.com/xinix00/hop-os-surf/surf"
+	"github.com/xinix00/hop-os-surf/window"
 )
 
 // recListener onthoudt geaccepteerde verbindingen zodat de test er één kan

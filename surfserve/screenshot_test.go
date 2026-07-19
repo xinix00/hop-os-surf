@@ -10,10 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xinix00/hop-os-surf/window"
-	"github.com/xinix00/hop-os-surf/face"
+	"github.com/xinix00/hop-os-surf/calc"
 	"github.com/xinix00/hop-os-surf/compositor"
+	"github.com/xinix00/hop-os-surf/face"
 	"github.com/xinix00/hop-os-surf/surf"
+	"github.com/xinix00/hop-os-surf/window"
 )
 
 // TestScreenshotDemo is het meetinstrument als dev-tool: hij bouwt een echte
@@ -38,31 +39,49 @@ func TestScreenshotDemo(t *testing.T) {
 	web := httptest.NewServer(srv.Handler())
 	defer web.Close()
 
-	// Window 1: de klok, met de echte wijzerplaat.
+	// Drie windows van drie "nodes": klok, telemetrie en de rekenmachine.
 	clk, err := window.Open(l.Addr().String(), "clock @ node-a", 320, 320, t.Logf)
 	if err != nil {
 		t.Fatal(err)
 	}
-	face.Draw(clk.Image(), time.Date(2026, 7, 19, 10, 8, 42, 0, time.UTC))
-	if err := clk.Present(); err != nil {
-		t.Fatal(err)
-	}
-
-	// Window 2: een telemetrie-achtig paneel (balkjes) van een tweede "node".
 	tel, err := window.Open(l.Addr().String(), "sensors @ node-b", 420, 300, t.Logf)
 	if err != nil {
 		t.Fatal(err)
 	}
-	drawBars(tel.Image())
-	if err := tel.Present(); err != nil {
+	cw, err := window.Open(l.Addr().String(), "calc @ node-c", 240, 320, t.Logf)
+	if err != nil {
 		t.Fatal(err)
 	}
+	var cc calc.Calc
+	for _, k := range []byte("12+34=") {
+		cc.Press(k)
+	}
 
-	// Cursor erbij (de KVM-aanwijzer) en dan de PNG ophalen.
+	// Cursor erbij (de KVM-aanwijzer); hertekenen per poging zodat late
+	// CONFIGUREs (WM-maten) altijd verwerkt worden — apps vullen hun cel.
 	srv.Input(surf.Input{Kind: surf.InputMove, X: 700, Y: 400})
-	eventually(t, "both windows composed", func() bool {
+	eventually(t, "all windows composed at final sizes", func() bool {
+		// Pas klaar als iedereen zijn definitieve WM-maat heeft (3 windows
+		// op 1280 breed = 2 kolommen → cellen van ~630 px breed).
+		for _, w := range []*window.Window{clk, tel, cw} {
+			if ww, _ := w.Size(); ww < 500 {
+				return false
+			}
+		}
+		face.Draw(clk.Image(), time.Date(2026, 7, 19, 10, 8, 42, 0, time.UTC))
+		if err := clk.Present(); err != nil {
+			t.Fatal(err)
+		}
+		drawBars(tel.Image())
+		if err := tel.Present(); err != nil {
+			t.Fatal(err)
+		}
+		calc.Render(cw.Image(), &cc)
+		if err := cw.Present(); err != nil {
+			t.Fatal(err)
+		}
 		_, ok1 := findColor(t, web.URL, color.RGBA{0xFF, 0x6E, 0x50, 0xFF}) // secondewijzer
-		_, ok2 := findColor(t, web.URL, color.RGBA{0x39, 0xB5, 0x6A, 0xFF}) // groene balk
+		_, ok2 := findColor(t, web.URL, color.RGBA{0x39, 0xB5, 0x6A, 0xFF}) // groene balk/=-knop
 		return ok1 && ok2
 	})
 	resp, err := http.Get(web.URL + "/screen.png")

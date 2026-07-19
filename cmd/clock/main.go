@@ -7,13 +7,14 @@ package main
 
 import (
 	"fmt"
+	"sync/atomic"
 	"time"
 
-	"hop-os/metal/app/applib"
-	"hop-os/metal/app/applib/appnet"
-	"github.com/xinix00/hop-os-surf/window"
 	"github.com/xinix00/hop-os-surf/face"
 	"github.com/xinix00/hop-os-surf/surf"
+	"github.com/xinix00/hop-os-surf/window"
+	"hop-os/metal/app/applib"
+	"hop-os/metal/app/applib/appnet"
 )
 
 const size = 320
@@ -41,10 +42,15 @@ func main() {
 	app.Logf("clock: window open on %s", addr)
 
 	// Input van de display (browser-KVM!): kliks loggen — het bewijs dat de
-	// terugweg tot in een remote app reikt.
+	// terugweg tot in een remote app reikt. Een resize van de WM forceert
+	// een herteken (Image() heeft dan al de nieuwe maat).
+	var resized atomic.Bool
 	go func() {
 		for ev := range win.Events() {
-			if ev.Kind == surf.InputButton && ev.Value == 1 {
+			switch {
+			case ev.Kind == window.KindResize:
+				resized.Store(true)
+			case ev.Kind == surf.InputButton && ev.Value == 1:
 				app.Logf("clock: click at %d,%d", ev.X, ev.Y)
 			}
 		}
@@ -53,7 +59,7 @@ func main() {
 	last := -1
 	for {
 		now := time.Now()
-		if s := now.Second(); s != last {
+		if s := now.Second(); s != last || resized.Swap(false) {
 			last = s
 			face.Draw(win.Image(), now)
 			if err := win.Present(); err != nil {

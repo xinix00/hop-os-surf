@@ -2,7 +2,7 @@
 // IBM VGA-font via Marcel Sondaar); LSB = linkerpixel. NIET met de hand
 // bewerken. Kopie van driver/fb/font.go: app-kant mag driver/ niet
 // importeren (indeling.md regel 2), en fontdata is geen driver.
-package compositor
+package pixel
 
 // font8x8: glyphs voor ASCII 0x00-0x7F, 8 rijen per teken.
 var font8x8 = [128][8]byte{

@@ -1,8 +1,15 @@
 // Package compositor is de software-fallback-compositor van de display-app
-// (docs/gui-ontwerp.md §2/§5): surfaces in een tiling-grid met titelbalken,
-// gecomponeerd naar een RGBA-beeld. De HVS/DPU-hardware-targets van P4 nemen
-// later dezelfde surfaces over als planes; dit pakket blijft dan de fallback
-// voor boards zonder scanout-compositor (en voor de headless screenshot-test).
+// (HopOS docs/gui-ontwerp.md §2/§5): surfaces in een tiling-grid met
+// titelbalken, gecomponeerd naar een RGBA-beeld. De HVS/DPU-hardware-targets
+// van P4 nemen later dezelfde surfaces over als planes; dit pakket blijft de
+// fallback voor boards zonder scanout-compositor (en voor de headless
+// screenshot-test).
+//
+// Maatvoering is WM-gestuurd (de Wayland-les): de app *vraagt* een maat
+// (hint in CREATE), maar Relayout bepaalt wat elk window krijgt en meldt
+// wijzigingen via OnResize — de server stuurt daar CONFIGURE op uit. Damage
+// op een verouderde maat wordt stil gedropt: die app is gewoon nog onderweg
+// naar de nieuwe maat.
 //
 // Pixelmodel: surfaces bufferen intern in RGBA-bytevolgorde (zoals
 // image.RGBA); de draad levert XRGB8888 little-endian (B,G,R,X). De enige
@@ -13,8 +20,9 @@ import (
 	"errors"
 	"image"
 	"image/color"
-	"image/draw"
 	"sync"
+
+	"github.com/xinix00/hop-os-surf/pixel"
 )
 
 // Instrumentenpaneel-kleuren (docs/gui-ontwerp.md §5): vlak, 1-px randen,
@@ -36,34 +44,46 @@ const margin = 8 // pixels tussen/rond windows
 
 // Surface is één window-inhoud: dubbel gebufferd (DAMAGE schrijft back,
 // PRESENT flipt naar front — de compositor leest alleen front, dus een traag
-// frame kan nooit half zichtbaar worden).
+// frame kan nooit half zichtbaar worden). De maat is van de WM: alleen
+// resize (via Relayout) verandert hem.
 type Surface struct {
 	Name string
-	W, H int
 
 	mu        sync.Mutex
-	back      []byte // RGBA-bytes, stride = W*4
+	w, h      int
+	back      []byte // RGBA-bytes, stride = w*4
 	front     []byte
 	presented bool // er is ooit een PRESENT geweest (anders: leeg vlak tonen)
 
-	// screen is de content-rechthoek van de laatste compose (voor hit-test);
-	// alleen onder Compositor.mu gelezen/geschreven.
+	// win/screen zijn de window- en content-rechthoek van de laatste
+	// Relayout; alleen onder Compositor.mu gelezen/geschreven.
+	win    image.Rectangle
 	screen image.Rectangle
 }
 
-// Damage schrijft wire-pixels (XRGB8888) in de back-buffer van de surface.
+// Size geeft de huidige (WM-)maat van de surface.
+func (s *Surface) Size() (w, h int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w, s.h
+}
+
+// Damage schrijft wire-pixels (XRGB8888) in de back-buffer. Een rechthoek
+// die niet (meer) binnen de surface past wordt stil gedropt — dat is een
+// frame op een verouderde maat, geen fout (de CONFIGURE is al onderweg).
+// Een pixellengte die niet bij de rechthoek past is wél corruptie.
 func (s *Surface) Damage(x, y, w, h int, wire []byte) error {
-	if x < 0 || y < 0 || w <= 0 || h <= 0 || x+w > s.W || y+h > s.H {
-		return errors.New("compositor: damage outside surface")
-	}
-	if len(wire) != w*h*4 {
+	if w <= 0 || h <= 0 || len(wire) != w*h*4 {
 		return errors.New("compositor: damage pixel length mismatch")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if x < 0 || y < 0 || x+w > s.w || y+h > s.h {
+		return nil // verouderde maat: droppen
+	}
 	for row := 0; row < h; row++ {
 		src := wire[row*w*4 : (row+1)*w*4]
-		dst := s.back[((y+row)*s.W+x)*4:]
+		dst := s.back[((y+row)*s.w+x)*4:]
 		for i := 0; i < w; i++ {
 			// XRGB little-endian → RGBA: B,G,R,X → R,G,B,A.
 			dst[i*4+0] = src[i*4+2]
@@ -75,6 +95,36 @@ func (s *Surface) Damage(x, y, w, h int, wire []byte) error {
 	return nil
 }
 
+// resize legt een nieuwe WM-maat op; de overlap van het oude beeld blijft
+// staan (geen zwart gat terwijl de app naar de nieuwe maat onderweg is).
+func (s *Surface) resize(w, h int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if w == s.w && h == s.h {
+		return
+	}
+	back := make([]byte, w*h*4)
+	front := make([]byte, w*h*4)
+	// Nieuw gebied vooraf vullen met het content-vlak (opaak!): zero-bytes
+	// zijn alpha-0 en dat wordt "transparant wit" in de PNG van /screen.png.
+	for i := 0; i < w*h; i++ {
+		back[i*4+0], back[i*4+1], back[i*4+2], back[i*4+3] = colContentPad.R, colContentPad.G, colContentPad.B, 0xFF
+	}
+	copy(front, back)
+	cw, ch := s.w, s.h
+	if w < cw {
+		cw = w
+	}
+	if h < ch {
+		ch = h
+	}
+	for row := 0; row < ch; row++ {
+		copy(front[row*w*4:row*w*4+cw*4], s.front[row*s.w*4:row*s.w*4+cw*4])
+		copy(back[row*w*4:row*w*4+cw*4], s.back[row*s.w*4:row*s.w*4+cw*4])
+	}
+	s.w, s.h, s.back, s.front = w, h, back, front
+}
+
 // Compositor componeert alle surfaces in een grid naar één RGBA-beeld.
 type Compositor struct {
 	mu       sync.Mutex
@@ -83,6 +133,10 @@ type Compositor struct {
 	focus    *Surface
 	dirty    bool
 	gen      uint64
+	titleH   int
+	scale    int
+
+	onResize func(s *Surface, w, h int)
 
 	curX, curY int
 	curOn      bool
@@ -90,9 +144,22 @@ type Compositor struct {
 
 // New maakt een compositor voor een scherm van w×h pixels.
 func New(w, h int) *Compositor {
-	c := &Compositor{img: image.NewRGBA(image.Rect(0, 0, w, h)), dirty: true}
-	return c
+	scale := 1
+	if h >= 720 {
+		scale = 2 // zelfde regel als de fb-console: echt scherm → 2×
+	}
+	return &Compositor{
+		img:    image.NewRGBA(image.Rect(0, 0, w, h)),
+		dirty:  true,
+		scale:  scale,
+		titleH: 8*scale + 6,
+	}
 }
+
+// OnResize registreert de callback die elke WM-maatwijziging meldt (de
+// server stuurt er CONFIGURE op uit). Wordt buiten de compositor-lock
+// aangeroepen; zetten vóór de eerste Add.
+func (c *Compositor) OnResize(f func(s *Surface, w, h int)) { c.onResize = f }
 
 // Size geeft de schermmaat.
 func (c *Compositor) Size() (w, h int) {
@@ -100,16 +167,14 @@ func (c *Compositor) Size() (w, h int) {
 	return b.Dx(), b.Dy()
 }
 
-// Add voegt een surface toe (nieuwe windows krijgen focus) en markeert het
-// scherm vuil.
-func (c *Compositor) Add(name string, w, h int) *Surface {
-	s := &Surface{
-		Name:  name,
-		W:     w,
-		H:     h,
-		back:  make([]byte, w*h*4),
-		front: make([]byte, w*h*4),
-	}
+// Add voegt een surface toe (nieuwe windows krijgen focus). hintW/hintH is
+// de wens van de app — v1 negeert hem (het grid beslist); hij bestaat voor
+// latere aspect/schaal-keuzes. Roep daarna Relayout aan (ná registratie van
+// de eigenaar) om de echte maat toe te kennen.
+func (c *Compositor) Add(name string, hintW, hintH int) *Surface {
+	_ = hintW
+	_ = hintH
+	s := &Surface{Name: name}
 	c.mu.Lock()
 	c.surfaces = append(c.surfaces, s)
 	c.focus = s
@@ -119,7 +184,8 @@ func (c *Compositor) Add(name string, w, h int) *Surface {
 }
 
 // Remove haalt een surface weg (bv. bij een verbroken verbinding); de focus
-// schuift naar het laatst toegevoegde window dat overblijft.
+// schuift naar het laatst toegevoegde window dat overblijft. Roep daarna
+// Relayout aan om de rest de vrijgekomen ruimte te geven.
 func (c *Compositor) Remove(s *Surface) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -136,6 +202,54 @@ func (c *Compositor) Remove(s *Surface) {
 		}
 	}
 	c.dirty = true
+}
+
+// Relayout verdeelt het scherm (tiling-grid, kolommen ~ vierkant), legt elke
+// surface zijn content-maat op en meldt wijzigingen via OnResize — buiten de
+// lock, want de callback schrijft doorgaans naar een verbinding.
+func (c *Compositor) Relayout() {
+	type change struct {
+		s    *Surface
+		w, h int
+	}
+	var changes []change
+
+	c.mu.Lock()
+	if n := len(c.surfaces); n > 0 {
+		bounds := c.img.Bounds()
+		cols := 1
+		for cols*cols < n {
+			cols++
+		}
+		rows := (n + cols - 1) / cols
+		cellW := (bounds.Dx() - (cols+1)*margin) / cols
+		cellH := (bounds.Dy() - (rows+1)*margin) / rows
+
+		for i, s := range c.surfaces {
+			col, row := i%cols, i/cols
+			x0 := margin + col*(cellW+margin)
+			y0 := margin + row*(cellH+margin)
+			win := image.Rect(x0, y0, x0+cellW, y0+cellH)
+			content := image.Rect(win.Min.X+1, win.Min.Y+c.titleH, win.Max.X-1, win.Max.Y-1)
+			if content.Dx() < 8 || content.Dy() < 8 {
+				content.Max = content.Min.Add(image.Pt(8, 8)) // vloer: nooit 0×0
+			}
+			s.win, s.screen = win, content
+			if w, h := s.Size(); w != content.Dx() || h != content.Dy() {
+				s.resize(content.Dx(), content.Dy())
+				changes = append(changes, change{s, content.Dx(), content.Dy()})
+			}
+		}
+	}
+	c.dirty = true
+	f := c.onResize
+	c.mu.Unlock()
+
+	if f != nil {
+		for _, ch := range changes {
+			f(ch.s, ch.w, ch.h)
+		}
+	}
 }
 
 // Present flipt back→front voor deze surface en markeert het scherm vuil.
@@ -223,71 +337,45 @@ func (c *Compositor) composeLocked() (gen uint64, changed bool) {
 	c.dirty = false
 	c.gen++
 
-	bounds := c.img.Bounds()
-	draw.Draw(c.img, bounds, image.NewUniform(colBG), image.Point{}, draw.Src)
-
-	n := len(c.surfaces)
-	if n == 0 {
-		drawString(c.img, margin, margin, 1, colBorderIdle, "hopos display: no surfaces")
+	pixel.Fill(c.img, c.img.Bounds(), colBG)
+	if len(c.surfaces) == 0 {
+		pixel.DrawString(c.img, margin, margin, 1, colBorderIdle, "hopos display: no surfaces")
 		return c.gen, true
 	}
 
-	// Tiling-grid (docs/gui-ontwerp.md §5): kolommen ~ vierkant.
-	cols := 1
-	for cols*cols < n {
-		cols++
-	}
-	rows := (n + cols - 1) / cols
-
-	scale := 1
-	if bounds.Dy() >= 720 {
-		scale = 2 // zelfde regel als de fb-console: echt scherm → 2×
-	}
-	titleH := 8*scale + 6
-
-	cellW := (bounds.Dx() - (cols+1)*margin) / cols
-	cellH := (bounds.Dy() - (rows+1)*margin) / rows
-
-	for i, s := range c.surfaces {
-		col, row := i%cols, i/cols
-		x0 := margin + col*(cellW+margin)
-		y0 := margin + row*(cellH+margin)
-		win := image.Rect(x0, y0, x0+cellW, y0+cellH)
-
+	for _, s := range c.surfaces {
 		title, border := colTitleIdle, colBorderIdle
 		if s == c.focus {
 			title, border = colTitleFocus, colBorderFocus
 		}
 		// Titelbalk + naam (het cluster zichtbaar in de chrome: de app zet
 		// zijn herkomst in de naam, bv. "clock @ node-b").
-		bar := image.Rect(win.Min.X, win.Min.Y, win.Max.X, win.Min.Y+titleH)
-		draw.Draw(c.img, bar, image.NewUniform(title), image.Point{}, draw.Src)
-		drawString(c.img, win.Min.X+4*scale, win.Min.Y+3, scale, colText, s.Name)
+		bar := image.Rect(s.win.Min.X, s.win.Min.Y, s.win.Max.X, s.win.Min.Y+c.titleH)
+		pixel.Fill(c.img, bar, title)
+		pixel.DrawString(c.img, s.win.Min.X+4*c.scale, s.win.Min.Y+3, c.scale, colText, s.Name)
 
-		// Content-vlak: surface op native maat, linksboven verankerd,
-		// geclipt op de cel (geen schaling in v1 — dat doet de HVS straks
-		// gratis). Ongebruikte content-ruimte is een donkerder vlak.
-		content := image.Rect(win.Min.X, win.Min.Y+titleH, win.Max.X, win.Max.Y)
-		draw.Draw(c.img, content, image.NewUniform(colContentPad), image.Point{}, draw.Src)
+		// Content: de surface heeft exact de content-maat (WM-gestuurd);
+		// tijdens een resize-overgang clippen we defensief.
 		s.mu.Lock()
-		cw, ch := s.W, s.H
-		if cw > content.Dx() {
-			cw = content.Dx()
-		}
-		if ch > content.Dy() {
-			ch = content.Dy()
-		}
-		if s.presented {
+		if !s.presented {
+			pixel.Fill(c.img, s.screen, colContentPad)
+		} else {
+			cw, ch := s.w, s.h
+			if cw > s.screen.Dx() {
+				cw = s.screen.Dx()
+			}
+			if ch > s.screen.Dy() {
+				ch = s.screen.Dy()
+			}
 			for row := 0; row < ch; row++ {
-				src := s.front[row*s.W*4 : row*s.W*4+cw*4]
-				dstOff := c.img.PixOffset(content.Min.X, content.Min.Y+row)
+				src := s.front[row*s.w*4 : row*s.w*4+cw*4]
+				dstOff := c.img.PixOffset(s.screen.Min.X, s.screen.Min.Y+row)
 				copy(c.img.Pix[dstOff:dstOff+cw*4], src)
 			}
 		}
 		s.mu.Unlock()
-		s.screen = image.Rect(content.Min.X, content.Min.Y, content.Min.X+cw, content.Min.Y+ch)
 
-		rectOutline(c.img, win, border)
+		pixel.Outline(c.img, s.win, border)
 	}
 
 	if c.curOn {
@@ -306,18 +394,6 @@ func (c *Compositor) Snapshot() (*image.RGBA, uint64) {
 	return cp, c.gen
 }
 
-// rectOutline tekent een 1-px rand.
-func rectOutline(img *image.RGBA, r image.Rectangle, col color.RGBA) {
-	for x := r.Min.X; x < r.Max.X; x++ {
-		img.SetRGBA(x, r.Min.Y, col)
-		img.SetRGBA(x, r.Max.Y-1, col)
-	}
-	for y := r.Min.Y; y < r.Max.Y; y++ {
-		img.SetRGBA(r.Min.X, y, col)
-		img.SetRGBA(r.Max.X-1, y, col)
-	}
-}
-
 // drawCursor tekent een crosshair-cursor met donker randje (zichtbaar op
 // licht én donker); de HVS maakt hier in P4 een hardware-plane van.
 func drawCursor(img *image.RGBA, x, y int) {
@@ -334,36 +410,6 @@ func drawCursor(img *image.RGBA, x, y int) {
 		}
 		if image.Pt(x, y+d).In(img.Bounds()) {
 			img.SetRGBA(x, y+d, colCursor)
-		}
-	}
-}
-
-// drawString tekent ASCII-tekst met het 8x8-font op pixelpositie (x,y).
-func drawString(img *image.RGBA, x, y, scale int, col color.RGBA, s string) {
-	for i := 0; i < len(s); i++ {
-		ch := s[i]
-		if ch < 0x20 || ch >= 0x80 {
-			ch = '?'
-		}
-		drawGlyph(img, x+i*8*scale, y, scale, col, ch)
-	}
-}
-
-func drawGlyph(img *image.RGBA, x, y, scale int, col color.RGBA, ch byte) {
-	for gy := 0; gy < 8; gy++ {
-		bits := font8x8[ch][gy]
-		for gx := 0; gx < 8; gx++ {
-			if bits>>gx&1 == 0 {
-				continue
-			}
-			for sy := 0; sy < scale; sy++ {
-				for sx := 0; sx < scale; sx++ {
-					px, py := x+gx*scale+sx, y+gy*scale+sy
-					if image.Pt(px, py).In(img.Bounds()) {
-						img.SetRGBA(px, py, col)
-					}
-				}
-			}
 		}
 	}
 }

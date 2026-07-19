@@ -19,9 +19,12 @@ GUI code. Design dossier (the negotiated source of truth, Dutch):
 | `compositor/` | software compositor: tiling grid, title bars, double-buffered surfaces, cursor |
 | `surfserve/` | SURF sessions + the built-in web-KVM: `/screen.png` (headless screenshot) and `/kvm` (watch + mouse/keys from any browser) |
 | `window/` | the app side: `window.Open`, draw, `Present()` — reconnects and resends a full frame on its own |
+| `pixel/` | tiny shared drawing layer: the 8x8 font, fills, outlines |
 | `face/` | the demo clock face |
+| `calc/` | calculator logic + rendering (host-tested) |
 | `cmd/display` | the display server app (SURF on :7878, HTTP on :80) |
 | `cmd/clock` | the demo app: an analog clock from anywhere in the cluster |
+| `cmd/calc` | the interactive demo: a calculator you operate through the web-KVM |
 
 ## Build & test
 
@@ -41,9 +44,17 @@ Render the demo screenshot without any hardware:
 SCREENSHOT_OUT=$PWD/docs/desktop-demo.png go test ./surfserve -run Screenshot
 ```
 
+## Sizing is the WM's call
+
+CREATE carries a size *hint*; CONFIGURE is authoritative (the Wayland
+lesson). Apps re-render at whatever size the tiling layout hands them —
+windows always fill their cell exactly. Damage at a stale size is silently
+dropped; a presenting app converges on its own.
+
 ## Status
 
-P1 of the design dossier: pixels + damage over TCP, software compositor,
-web-KVM. Next: the scene layer (SCENE/PATCH/EVENT — bytes per update instead
-of kilobytes), the local zero-copy transport, and the HVS plane path on the
+P1 of the design dossier: pixels + damage over TCP, software compositor
+with WM-driven sizing, web-KVM, and two demo apps (clock, calculator).
+Next: the scene layer (SCENE/PATCH/EVENT — bytes per update instead of
+kilobytes), the local zero-copy transport, and the HVS plane path on the
 Raspberry Pi.

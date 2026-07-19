@@ -35,7 +35,24 @@ func New(comp *compositor.Compositor, logf func(string, ...any)) *Server {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	return &Server{comp: comp, logf: logf, sessions: make(map[*compositor.Surface]*session)}
+	s := &Server{comp: comp, logf: logf, sessions: make(map[*compositor.Surface]*session)}
+	// De WM beslist de maat: elke Relayout-wijziging wordt een CONFIGURE
+	// naar de eigenaar van de surface (docs/gui-ontwerp.md §3).
+	comp.OnResize(s.configure)
+	return s
+}
+
+// configure stuurt de nieuwe WM-maat naar de app die de surface bezit.
+func (s *Server) configure(sur *compositor.Surface, w, h int) {
+	s.mu.Lock()
+	sess := s.sessions[sur]
+	s.mu.Unlock()
+	if sess == nil {
+		return
+	}
+	if sid, ok := sess.idOf(sur); ok {
+		sess.send(surf.TypeConfigure, sid, surf.Configure{W: uint16(w), H: uint16(h)}.Encode())
+	}
 }
 
 // session is één app-verbinding met zijn surfaces.
@@ -44,8 +61,50 @@ type session struct {
 	conn net.Conn
 	app  string
 
-	writeMu  sync.Mutex // INPUT/CONFIGURE delen de stream met elkaar
+	writeMu sync.Mutex // INPUT/CONFIGURE delen de stream met elkaar
+
+	mu       sync.Mutex // surfaces: read-lus, relayout-callbacks én input-routering
 	surfaces map[uint16]*compositor.Surface
+}
+
+// get geeft de surface bij een id (nil onbekend).
+func (sess *session) get(id uint16) *compositor.Surface {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	return sess.surfaces[id]
+}
+
+// put registreert id → surface en geeft de eventuele oude terug.
+func (sess *session) put(id uint16, sur *compositor.Surface) (old *compositor.Surface) {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	old = sess.surfaces[id]
+	sess.surfaces[id] = sur
+	return old
+}
+
+// idOf zoekt het id van een surface (input/configure gaan per id terug).
+func (sess *session) idOf(sur *compositor.Surface) (uint16, bool) {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	for sid, cur := range sess.surfaces {
+		if cur == sur {
+			return sid, true
+		}
+	}
+	return 0, false
+}
+
+// takeAll leegt de map (cleanup) en geeft alle surfaces terug.
+func (sess *session) takeAll() []*compositor.Surface {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	all := make([]*compositor.Surface, 0, len(sess.surfaces))
+	for _, sur := range sess.surfaces {
+		all = append(all, sur)
+	}
+	sess.surfaces = make(map[uint16]*compositor.Surface)
+	return all
 }
 
 // ServeSURF draait de accept-lus tot de listener sluit.
@@ -95,23 +154,22 @@ func (s *Server) handle(conn net.Conn) {
 				s.logf("surf: %s: bad CREATE (%v)", sess.app, err)
 				return
 			}
-			if old := sess.surfaces[h.Surface]; old != nil {
-				// Her-CREATE van hetzelfde id (reconnectsemantiek binnen een
-				// sessie bestaat niet, maar wees voorspelbaar): oude weg.
+			// V0 heeft geen titelveld in CREATE: de HELLO-appnaam is de
+			// windowtitel (de app zet daar zelf zijn herkomst in). De
+			// CREATE-maat is een hint — Relayout kent de echte maat toe en
+			// de OnResize-callback stuurt de CONFIGURE; registratie moet
+			// dus vóór de Relayout.
+			sur := s.comp.Add(sess.app, int(c.W), int(c.H))
+			if old := sess.put(h.Surface, sur); old != nil {
+				// Her-CREATE van hetzelfde id: oude weg, wees voorspelbaar.
 				s.comp.Remove(old)
 				s.unregister(old)
 			}
-			// V0 heeft geen titelveld in CREATE: de HELLO-appnaam is de
-			// windowtitel (de app zet daar zelf zijn herkomst in).
-			sur := s.comp.Add(sess.app, int(c.W), int(c.H))
-			sess.surfaces[h.Surface] = sur
 			s.register(sur, sess)
-			// CONFIGURE terug: v1 bevestigt de gevraagde maat (het grid
-			// clipt; echte re-flow komt met de scene-laag).
-			sess.send(surf.TypeConfigure, h.Surface, surf.Configure{W: c.W, H: c.H}.Encode())
+			s.comp.Relayout()
 		case surf.TypeDamage:
 			d, pix, err := surf.DecodeDamage(buf)
-			sur := sess.surfaces[h.Surface]
+			sur := sess.get(h.Surface)
 			if err != nil || sur == nil {
 				s.logf("surf: %s: bad DAMAGE (%v)", sess.app, err)
 				return
@@ -121,7 +179,7 @@ func (s *Server) handle(conn net.Conn) {
 				return
 			}
 		case surf.TypePresent:
-			if sur := sess.surfaces[h.Surface]; sur != nil {
+			if sur := sess.get(h.Surface); sur != nil {
 				s.comp.Present(sur)
 			}
 		case surf.TypeClose:
@@ -146,9 +204,13 @@ func (s *Server) unregister(sur *compositor.Surface) {
 }
 
 func (sess *session) cleanup() {
-	for _, sur := range sess.surfaces {
+	all := sess.takeAll()
+	for _, sur := range all {
 		sess.srv.comp.Remove(sur)
 		sess.srv.unregister(sur)
+	}
+	if len(all) > 0 {
+		sess.srv.comp.Relayout() // de rest krijgt de vrijgekomen ruimte
 	}
 	sess.conn.Close()
 }
@@ -199,13 +261,7 @@ func (s *Server) Input(ev surf.Input) {
 	if ev.Kind == surf.InputMove || ev.Kind == surf.InputButton {
 		ev.X, ev.Y = uint16(lx), uint16(ly)
 	}
-	var id uint16
-	for sid, cur := range sess.surfaces {
-		if cur == sur {
-			id = sid
-			break
-		}
-	}
+	id, _ := sess.idOf(sur)
 	sess.send(surf.TypeInput, id, ev.Encode())
 }
 

@@ -18,13 +18,19 @@ import (
 
 var errClosed = errors.New("window: session lost")
 
-// Event is één input-event van de display (zie surf.Input*-kinds).
+// Event is één input-event van de display (zie surf.Input*-kinds), of een
+// resize (Kind == KindResize, X/Y = de nieuwe maat).
 type Event struct {
 	Kind  uint8
 	Code  uint32
 	Value int32
 	X, Y  uint16
 }
+
+// KindResize: de WM heeft het window een nieuwe maat gegeven (Wayland-les:
+// CREATE is een hint, CONFIGURE is de wet). Vraag Image() opnieuw op — die
+// heeft dan de nieuwe maat — herteken en Present.
+const KindResize uint8 = 255
 
 // Window is één surface op een display-node.
 type Window struct {
@@ -33,12 +39,13 @@ type Window struct {
 	img        *image.RGBA
 	logf       func(string, ...any)
 
-	mu      sync.Mutex
-	conn    net.Conn
-	dead    bool // leesgoroutine zag de verbinding sterven
-	frame   uint32
-	scratch []byte // wire-conversiebuffer (RGBA → XRGB8888)
-	events  chan Event
+	mu           sync.Mutex
+	conn         net.Conn
+	dead         bool // leesgoroutine zag de verbinding sterven
+	pendW, pendH int  // door de WM opgelegde maat (CONFIGURE), nog te verwerken
+	frame        uint32
+	scratch      []byte // wire-conversiebuffer (RGBA → XRGB8888)
+	events       chan Event
 }
 
 // Open verbindt met een display-node (addr = host:poort, doorgaans uit de
@@ -62,8 +69,29 @@ func Open(addr, name string, w, h int, logf func(string, ...any)) (*Window, erro
 	return win, nil
 }
 
-// Image is het tekenvlak: teken erin en roep Present aan.
-func (win *Window) Image() *image.RGBA { return win.img }
+// Image is het tekenvlak: teken erin en roep Present aan. Vraag hem elke
+// frame opnieuw op en cache hem niet — na een CONFIGURE van de WM is dit
+// een nieuw beeld op de nieuwe maat (de w/h van Open zijn slechts een hint).
+func (win *Window) Image() *image.RGBA {
+	win.mu.Lock()
+	if win.pendW > 0 && (win.pendW != win.w || win.pendH != win.h) {
+		win.w, win.h = win.pendW, win.pendH
+		win.img = image.NewRGBA(image.Rect(0, 0, win.w, win.h))
+		win.scratch = make([]byte, win.w*win.h*4)
+	}
+	win.mu.Unlock()
+	return win.img
+}
+
+// Size geeft de actuele (WM-)maat van het window.
+func (win *Window) Size() (w, h int) {
+	win.mu.Lock()
+	defer win.mu.Unlock()
+	if win.pendW > 0 {
+		return win.pendW, win.pendH
+	}
+	return win.w, win.h
+}
 
 // Events levert input van de display (toetsen/muis in lokale window-
 // coördinaten). Bij een overvolle buffer vallen oude events weg — input is
@@ -104,16 +132,20 @@ func (win *Window) present() error {
 		return errClosed
 	}
 	// RGBA → wire (XRGB8888 little-endian): de enige kopie aan de zendkant.
-	pix := win.img.Pix
-	for i := 0; i < win.w*win.h; i++ {
-		win.scratch[i*4+0] = pix[i*4+2]
-		win.scratch[i*4+1] = pix[i*4+1]
-		win.scratch[i*4+2] = pix[i*4+0]
-		win.scratch[i*4+3] = 0
+	// img/scratch wisselen alleen in Image() (zelfde tekengoroutine als
+	// Present — dat is het contract), dus hier consistent.
+	img, scratch := win.img, win.scratch
+	w, h := img.Bounds().Dx(), img.Bounds().Dy()
+	pix := img.Pix
+	for i := 0; i < w*h; i++ {
+		scratch[i*4+0] = pix[i*4+2]
+		scratch[i*4+1] = pix[i*4+1]
+		scratch[i*4+2] = pix[i*4+0]
+		scratch[i*4+3] = 0
 	}
 	win.frame++
-	d := surf.Damage{Frame: win.frame, W: uint16(win.w), H: uint16(win.h)}
-	if err := surf.WriteDamage(conn, 1, d, win.scratch); err != nil {
+	d := surf.Damage{Frame: win.frame, W: uint16(w), H: uint16(h)}
+	if err := surf.WriteDamage(conn, 1, d, scratch); err != nil {
 		return err
 	}
 	return surf.WriteMsg(conn, surf.TypePresent, 1, surf.Present{Frame: win.frame}.Encode())
@@ -172,27 +204,41 @@ func (win *Window) readLoop(conn net.Conn) {
 			return
 		}
 		switch h.Type {
+		case surf.TypeConfigure:
+			cfg, err := surf.DecodeConfigure(buf)
+			if err != nil || cfg.W == 0 || cfg.H == 0 {
+				continue
+			}
+			win.mu.Lock()
+			win.pendW, win.pendH = int(cfg.W), int(cfg.H)
+			win.mu.Unlock()
+			win.deliver(Event{Kind: KindResize, X: cfg.W, Y: cfg.H})
 		case surf.TypeInput:
 			in, err := surf.DecodeInput(buf)
 			if err != nil {
 				continue
 			}
-			ev := Event{Kind: in.Kind, Code: in.Code, Value: in.Value, X: in.X, Y: in.Y}
-			select {
-			case win.events <- ev:
-			default: // vol: oudste eruit, nieuwste erin — input is vers-waarde
-				select {
-				case <-win.events:
-				default:
-				}
-				select {
-				case win.events <- ev:
-				default:
-				}
-			}
+			win.deliver(Event{Kind: in.Kind, Code: in.Code, Value: in.Value, X: in.X, Y: in.Y})
 		case surf.TypeClose:
 			conn.Close()
 			return
+		}
+	}
+}
+
+// deliver zet een event in de buffer; bij een volle buffer valt het oudste
+// weg — input is een verse-waarde-stroom, geen log.
+func (win *Window) deliver(ev Event) {
+	select {
+	case win.events <- ev:
+	default:
+		select {
+		case <-win.events:
+		default:
+		}
+		select {
+		case win.events <- ev:
+		default:
 		}
 	}
 }
