@@ -76,7 +76,7 @@ func TestScreenshotDemo(t *testing.T) {
 		if err := tel.Present(); err != nil {
 			t.Fatal(err)
 		}
-		calc.Render(cw.Image(), &cc)
+		calc.Render(cw.Image(), &cc, '7')
 		if err := cw.Present(); err != nil {
 			t.Fatal(err)
 		}

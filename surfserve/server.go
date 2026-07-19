@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/xinix00/hop-os-surf/compositor"
 	"github.com/xinix00/hop-os-surf/surf"
@@ -270,6 +271,7 @@ func (s *Server) Input(ev surf.Input) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/screen.png", s.serveScreen)
+	mux.HandleFunc("/stream", s.serveStream)
 	mux.HandleFunc("/kvm", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, kvmPage)
@@ -308,6 +310,38 @@ func (s *Server) serveScreen(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/png")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Write(data)
+}
+
+// serveStream pusht damage-frames (compositor.FrameSince-formaat) over één
+// chunked HTTP-response — de browser tekent alleen de veranderde rechthoeken
+// (putImageData) en er wordt geen PNG meer geëncodeerd voor kijkers. Idle
+// scherm = nul bytes. 25 Hz polling op het generatienummer is display-side
+// een mutex-check; de kijkers-kant van docs/gui-ontwerp.md §6.
+func (s *Server) serveStream(w http.ResponseWriter, r *http.Request) {
+	fl, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Cache-Control", "no-store")
+
+	var gen uint64
+	for {
+		frame, next := s.comp.FrameSince(gen)
+		if next != gen {
+			if _, err := w.Write(frame); err != nil {
+				return
+			}
+			fl.Flush()
+			gen = next
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(40 * time.Millisecond):
+		}
+	}
 }
 
 // inputMsg is het JSON-event van de KVM-pagina.

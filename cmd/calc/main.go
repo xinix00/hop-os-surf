@@ -38,9 +38,10 @@ func main() {
 	app.Logf("calc: window open on %s", addr)
 
 	var c calc.Calc
+	var hover byte
 	redraw := func() {
 		img := win.Image() // elke frame opvragen: na een resize is hij nieuw
-		calc.Render(img, &c)
+		calc.Render(img, &c, hover)
 		if err := win.Present(); err != nil {
 			app.Logf("calc: present: %v", err)
 			app.Exit(1)
@@ -49,12 +50,19 @@ func main() {
 	redraw()
 
 	// De hele app is event-gedreven: geen ticker, geen polling — precies
-	// het "idle mag geen CPU kosten"-principe.
+	// het "idle mag geen CPU kosten"-principe. Hover herrendert alleen bij
+	// het wisselen van knop (de damage-stream laat het live zien).
 	for ev := range win.Events() {
 		var key byte
 		switch {
 		case ev.Kind == window.KindResize:
 			// herteken op de nieuwe maat (key blijft 0)
+		case ev.Kind == surf.InputMove:
+			h := calc.Hit(win.Image().Bounds(), int(ev.X), int(ev.Y))
+			if h == hover {
+				continue
+			}
+			hover = h
 		case ev.Kind == surf.InputButton && ev.Value == 1:
 			key = calc.Hit(win.Image().Bounds(), int(ev.X), int(ev.Y))
 		case ev.Kind == surf.InputKey && ev.Value == 1:

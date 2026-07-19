@@ -21,13 +21,13 @@ func TestRekenen(t *testing.T) {
 		{"10-4-3=", "3"},
 		{"7/2=", "3.5"},
 		{"9/0=", "err"},
-		{"9/0=C2+2=", "4"},          // C herstelt na err
+		{"9/0=C2+2=", "4"}, // C herstelt na err
 		{"12.5+0.5=", "13"},
-		{"5+=", "10"},               // = zonder tweede operand herhaalt met acc
-		{"123bb4=", "14"},           // backspace
-		{"..5=", "0.5"},             // dubbele punt genegeerd
-		{"2+3", "3"},                // display toont de lopende invoer
-		{"2+3=+1=", "6"},            // doorrekenen op het resultaat
+		{"5+=", "10"},     // = zonder tweede operand herhaalt met acc
+		{"123bb4=", "14"}, // backspace
+		{"..5=", "0.5"},   // dubbele punt genegeerd
+		{"2+3", "3"},      // display toont de lopende invoer
+		{"2+3=+1=", "6"},  // doorrekenen op het resultaat
 	}
 	for _, tc := range cases {
 		var c Calc
@@ -63,6 +63,6 @@ func TestHitEnKey(t *testing.T) {
 	for _, r := range []image.Rectangle{image.Rect(0, 0, 60, 60), image.Rect(0, 0, 500, 700)} {
 		var c Calc
 		press(&c, "1+2=")
-		Render(image.NewRGBA(r), &c)
+		Render(image.NewRGBA(r), &c, '5')
 	}
 }

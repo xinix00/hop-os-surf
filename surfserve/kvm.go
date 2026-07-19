@@ -1,15 +1,14 @@
 package surfserve
 
 // kvmPage is de ingebouwde browser-KVM (docs/gui-ontwerp.md §6, trap 1):
-// scherm kijken via /screen.png, muis en toetsen terug via POST /input.
-// Geen install, geen websockets. Het beeld wordt dubbel gebufferd in een
-// canvas getekend: een <img> die z'n src wisselt heeft tijdens elke reload
-// even naturalWidth=0, en dan klapt de coördinaat-schaal naar (0,0) — de
-// "muis schiet naar linksboven / klik mist"-bug (Derek, 19-07, live op de
-// eerste demo). Het canvas heeft altijd een geldige maat en pos() geeft
-// liever nil dan een verzonnen (0,0). Mousemove is client-side gesmoord tot
-// ~15/s (last-write-wins): elke move maakt display-side het scherm vuil en
-// dus een verse PNG — op een emulated core wil je die kraan niet vol open.
+// kijken via de damage-stream (/stream: alleen veranderde rechthoeken, met
+// putImageData op een canvas — idle scherm = nul bytes, geen PNG-encodes
+// display-side), met /screen.png-polling als fallback. Muis en toetsen terug
+// via POST /input. Geen install, geen websockets: fetch() leest de chunked
+// response als ReadableStream. Het canvas heeft altijd een geldige maat en
+// pos() geeft liever nil dan een verzonnen (0,0) — de "muis schiet naar
+// linksboven"-bug van de <img>-polling (Derek, 19-07, live op de eerste
+// demo). Mousemove is client-side gesmoord tot ~15/s (last-write-wins).
 // Paginatekst in het Engels: dit is scherm-output.
 const kvmPage = `<!doctype html>
 <html><head><meta charset="utf-8"><title>HopOS display</title><style>
@@ -25,19 +24,56 @@ const kvmPage = `<!doctype html>
 "use strict";
 const cv = document.getElementById("s");
 const ctx = cv.getContext("2d");
-function refresh() {
+// Frame: u32 len | u16 nRects | nRects×(x,y,w,h u16) | RGBA-pixels aaneen.
+function paint(p) {
+  const dv = new DataView(p.buffer, p.byteOffset, p.byteLength);
+  const n = dv.getUint16(0, true);
+  let off = 2, pix = 2 + n * 8;
+  for (let i = 0; i < n; i++) {
+    const x = dv.getUint16(off, true), y = dv.getUint16(off + 2, true);
+    const w = dv.getUint16(off + 4, true), h = dv.getUint16(off + 6, true);
+    off += 8;
+    if (x === 0 && y === 0 && (w > cv.width || h > cv.height)) {
+      cv.width = w; cv.height = h; // eerste (volledige) frame zet de maat
+    }
+    const data = new Uint8ClampedArray(p.buffer, p.byteOffset + pix, w * h * 4);
+    ctx.putImageData(new ImageData(data, w, h), x, y);
+    pix += w * h * 4;
+  }
+}
+async function stream() {
+  try {
+    const resp = await fetch("/stream");
+    if (!resp.ok || !resp.body) throw new Error(resp.status);
+    const rd = resp.body.getReader();
+    let buf = new Uint8Array(0);
+    for (;;) {
+      const {done, value} = await rd.read();
+      if (done) break;
+      if (buf.length === 0) { buf = value; } else {
+        const nb = new Uint8Array(buf.length + value.length);
+        nb.set(buf); nb.set(value, buf.length); buf = nb;
+      }
+      for (;;) {
+        if (buf.length < 4) break;
+        const len = new DataView(buf.buffer, buf.byteOffset).getUint32(0, true);
+        if (buf.length < 4 + len) break;
+        paint(buf.subarray(4, 4 + len));
+        buf = buf.subarray(4 + len);
+      }
+    }
+  } catch (e) { pollOnce(); } // display weg of oude versie: even pollen
+  setTimeout(stream, 1000);   // en de stream opnieuw proberen
+}
+function pollOnce() {
   const im = new Image();
   im.onload = () => {
-    if (cv.width !== im.width || cv.height !== im.height) {
-      cv.width = im.width; cv.height = im.height;
-    }
+    if (cv.width !== im.width || cv.height !== im.height) { cv.width = im.width; cv.height = im.height; }
     ctx.drawImage(im, 0, 0);
-    setTimeout(refresh, 200);
   };
-  im.onerror = () => setTimeout(refresh, 1000);
   im.src = "/screen.png?" + Date.now();
 }
-refresh();
+stream();
 function post(o) { fetch("/input", {method: "POST", body: JSON.stringify(o)}); }
 function pos(e) {
   const r = cv.getBoundingClientRect();

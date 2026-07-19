@@ -121,6 +121,12 @@ var (
 	colBtnEq   = color.RGBA{0x39, 0xB5, 0x6A, 0xFF}
 	colEdge    = color.RGBA{0x3A, 0x4A, 0x6A, 0xFF}
 	colText    = color.RGBA{0xF0, 0xF4, 0xFF, 0xFF}
+	// Hover-varianten (Derek 19-07: "dan zie je changes actief"): een tint
+	// lichter, plus een lichte rand — de damage-stream maakt dit bijna gratis.
+	colBtnHov   = color.RGBA{0x33, 0x42, 0x63, 0xFF}
+	colBtnOpHov = color.RGBA{0x47, 0x83, 0xE8, 0xFF}
+	colBtnEqHov = color.RGBA{0x4C, 0xC8, 0x7E, 0xFF}
+	colEdgeHov  = color.RGBA{0x9A, 0xB8, 0xE8, 0xFF}
 )
 
 // grid: 4×4 knoppen + een volle =-rij onderaan. Labels zijn ook de
@@ -164,8 +170,9 @@ func layout(b image.Rectangle) (display image.Rectangle, btns [17]image.Rectangl
 	return display, btns
 }
 
-// Render tekent de rekenmachine over het hele beeld.
-func Render(img *image.RGBA, c *Calc) {
+// Render tekent de rekenmachine over het hele beeld. hover is de toets
+// waar de muis boven hangt (0 = geen) — die knop licht op.
+func Render(img *image.RGBA, c *Calc, hover byte) {
 	b := img.Bounds()
 	pixel.Fill(img, b, colBG)
 	display, btns := layout(b)
@@ -184,15 +191,29 @@ func Render(img *image.RGBA, c *Calc) {
 
 	for i, r := range btns {
 		key := keyOf(i)
-		col := colBtn
+		col, edge := colBtn, colEdge
+		hov := key == hover
 		switch {
 		case key == '=':
 			col = colBtnEq
+			if hov {
+				col = colBtnEqHov
+			}
 		case key == '+' || key == '-' || key == '*' || key == '/' || key == 'C':
 			col = colBtnOp
+			if hov {
+				col = colBtnOpHov
+			}
+		default:
+			if hov {
+				col = colBtnHov
+			}
+		}
+		if hov {
+			edge = colEdgeHov
 		}
 		pixel.Fill(img, r, col)
-		pixel.Outline(img, r, colEdge)
+		pixel.Outline(img, r, edge)
 		pixel.DrawStringCentered(img, r, scale, colText, label(key))
 	}
 }

@@ -138,6 +138,14 @@ type Compositor struct {
 
 	onResize func(s *Surface, w, h int)
 
+	// Damage-administratie voor kijker-streams (/stream): welke rechthoeken
+	// veranderden er per compose-generatie. pending verzamelt tussen twee
+	// composes; frameLog bewaart de laatste ~128 generaties zodat een
+	// bijlopende kijker alleen de verschillen hoeft te halen.
+	pending  []image.Rectangle
+	frameLog map[uint64][]image.Rectangle
+	minGen   uint64
+
 	curX, curY int
 	curOn      bool
 }
@@ -149,10 +157,11 @@ func New(w, h int) *Compositor {
 		scale = 2 // zelfde regel als de fb-console: echt scherm → 2×
 	}
 	return &Compositor{
-		img:    image.NewRGBA(image.Rect(0, 0, w, h)),
-		dirty:  true,
-		scale:  scale,
-		titleH: 8*scale + 6,
+		img:      image.NewRGBA(image.Rect(0, 0, w, h)),
+		dirty:    true,
+		scale:    scale,
+		titleH:   8*scale + 6,
+		frameLog: make(map[uint64][]image.Rectangle),
 	}
 }
 
@@ -179,6 +188,7 @@ func (c *Compositor) Add(name string, hintW, hintH int) *Surface {
 	c.surfaces = append(c.surfaces, s)
 	c.focus = s
 	c.dirty = true
+	c.addDamageLocked(c.img.Bounds())
 	c.mu.Unlock()
 	return s
 }
@@ -202,6 +212,7 @@ func (c *Compositor) Remove(s *Surface) {
 		}
 	}
 	c.dirty = true
+	c.addDamageLocked(c.img.Bounds())
 }
 
 // Relayout verdeelt het scherm (tiling-grid, kolommen ~ vierkant), legt elke
@@ -242,6 +253,9 @@ func (c *Compositor) Relayout() {
 		}
 	}
 	c.dirty = true
+	if len(changes) > 0 {
+		c.addDamageLocked(c.img.Bounds())
+	}
 	f := c.onResize
 	c.mu.Unlock()
 
@@ -260,14 +274,32 @@ func (c *Compositor) Present(s *Surface) {
 	s.mu.Unlock()
 	c.mu.Lock()
 	c.dirty = true
+	c.addDamageLocked(s.screen)
 	c.mu.Unlock()
+}
+
+// addDamageLocked noteert een veranderde schermrechthoek (onder c.mu).
+func (c *Compositor) addDamageLocked(r image.Rectangle) {
+	r = r.Intersect(c.img.Bounds())
+	if !r.Empty() {
+		c.pending = append(c.pending, r)
+	}
+}
+
+// cursorRect is het door de cursor geraakte vlak rond (x,y).
+func cursorRect(x, y int) image.Rectangle {
+	return image.Rect(x-6, y-6, x+7, y+7)
 }
 
 // SetCursor beweegt de muiscursor (schermcoördinaten).
 func (c *Compositor) SetCursor(x, y int) {
 	c.mu.Lock()
 	if !c.curOn || c.curX != x || c.curY != y {
+		if c.curOn {
+			c.addDamageLocked(cursorRect(c.curX, c.curY)) // oude plek wissen
+		}
 		c.curOn, c.curX, c.curY = true, x, y
+		c.addDamageLocked(cursorRect(x, y))
 		c.dirty = true
 	}
 	c.mu.Unlock()
@@ -294,7 +326,11 @@ func (c *Compositor) ClickAt(x, y int) (s *Surface, lx, ly int, ok bool) {
 	if ok {
 		c.mu.Lock()
 		if c.focus != s {
+			if c.focus != nil {
+				c.addDamageLocked(c.focus.win)
+			}
 			c.focus = s
+			c.addDamageLocked(s.win)
 			c.dirty = true
 		}
 		c.mu.Unlock()
@@ -336,6 +372,15 @@ func (c *Compositor) composeLocked() (gen uint64, changed bool) {
 	}
 	c.dirty = false
 	c.gen++
+	c.frameLog[c.gen] = c.pending
+	c.pending = nil
+	if c.minGen == 0 {
+		c.minGen = c.gen
+	}
+	for c.gen-c.minGen > 128 {
+		delete(c.frameLog, c.minGen)
+		c.minGen++
+	}
 
 	pixel.Fill(c.img, c.img.Bounds(), colBG)
 	if len(c.surfaces) == 0 {
@@ -412,4 +457,66 @@ func drawCursor(img *image.RGBA, x, y int) {
 			img.SetRGBA(x, y+d, colCursor)
 		}
 	}
+}
+
+// FrameSince componeert (indien nodig) en pakt alles wat er sinds generatie
+// since veranderde in één wire-frame voor een kijker-stream (/stream):
+//
+//	u32 payloadLen | u16 nRects | nRects × (x,y,w,h u16) | RGBA-pixels aaneen
+//
+// (little-endian; pixels rij-op-rij per rect, zonder stride-opvulling — en
+// RGBA is exact wat een browser-ImageData wil hebben, nul conversie). Een
+// kijker die te ver achterloopt (of since 0) krijgt het volledige scherm.
+// Geen wijzigingen → (nil, since).
+func (c *Compositor) FrameSince(since uint64) (frame []byte, gen uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.composeLocked()
+	if c.gen == since {
+		return nil, since
+	}
+
+	bounds := c.img.Bounds()
+	var rects []image.Rectangle
+	if since == 0 || since < c.minGen-1 {
+		rects = []image.Rectangle{bounds}
+	} else {
+		for g := since + 1; g <= c.gen; g++ {
+			rects = append(rects, c.frameLog[g]...)
+		}
+		// Veel of grote rects: één volledig frame is dan kleiner én simpeler.
+		if len(rects) > 16 {
+			rects = []image.Rectangle{bounds}
+		}
+	}
+
+	size := 4 + 2
+	for _, r := range rects {
+		size += 8 + r.Dx()*r.Dy()*4
+	}
+	frame = make([]byte, size)
+	le := func(off int, v uint32, n int) {
+		for i := 0; i < n; i++ {
+			frame[off+i] = byte(v >> (8 * i))
+		}
+	}
+	le(0, uint32(size-4), 4)
+	le(4, uint32(len(rects)), 2)
+	off := 6
+	for _, r := range rects {
+		le(off, uint32(r.Min.X), 2)
+		le(off+2, uint32(r.Min.Y), 2)
+		le(off+4, uint32(r.Dx()), 2)
+		le(off+6, uint32(r.Dy()), 2)
+		off += 8
+	}
+	for _, r := range rects {
+		w := r.Dx() * 4
+		for y := r.Min.Y; y < r.Max.Y; y++ {
+			src := c.img.PixOffset(r.Min.X, y)
+			copy(frame[off:off+w], c.img.Pix[src:src+w])
+			off += w
+		}
+	}
+	return frame, c.gen
 }
