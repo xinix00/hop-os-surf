@@ -81,17 +81,26 @@ function pollOnce() {
   im.src = "/screen.png?" + Date.now();
 }
 stream();
-let ws = null;
+// Eén reconnect-pad met één timer: onerror sluit alleen (dat triggert
+// onclose), onclose plant precies één poging — anders verdubbelt elke
+// disconnect het aantal lussen ("input gaat bezurk", Derek 19-07).
+let ws = null, wsTimer = null;
+function scheduleWS() { if (!wsTimer) wsTimer = setTimeout(() => { wsTimer = null; wsConnect(); }, 1000); }
 function wsConnect() {
+  let s;
   const u = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/input";
-  try { ws = new WebSocket(u); } catch (e) { ws = null; return; }
-  ws.onclose = ws.onerror = () => { ws = null; setTimeout(wsConnect, 1000); };
+  try { s = new WebSocket(u); } catch (e) { scheduleWS(); return; }
+  s.onopen = () => { ws = s; };
+  s.onclose = () => { if (ws === s) ws = null; scheduleWS(); };
+  s.onerror = () => { try { s.close(); } catch (e) {} };
 }
 wsConnect();
 function post(o) {
   const j = JSON.stringify(o);
-  if (ws && ws.readyState === 1) { ws.send(j); }         // één blijvende socket
-  else { fetch("/input", {method: "POST", body: j}); }   // fallback
+  if (ws && ws.readyState === 1) { try { ws.send(j); } catch (e) {} }
+  // Zonder socket: moves droppen (verse-waarde-stroom) en de rest via een
+  // stille POST — geen fetch-storm terwijl de display weg is.
+  else if (o.k !== "move") { fetch("/input", {method: "POST", body: j}).catch(() => {}); }
 }
 function pos(e) {
   const r = cv.getBoundingClientRect();
