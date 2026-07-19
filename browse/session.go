@@ -6,7 +6,9 @@
 package browse
 
 import (
+	"io"
 	"net/http"
+	"time"
 
 	gost "github.com/gost-dom/browser"
 	"github.com/gost-dom/browser/html"
@@ -32,9 +34,42 @@ type Session struct {
 	win html.Window
 }
 
-// NewSession start een venster op de ingebouwde startpagina.
+// NewSession start een venster op de ingebouwde startpagina. Het netwerk
+// gaat via netProxy: gost-dom's eigen fetch heeft géén timeout, en één dooie
+// site zou anders de hele event-lus voorgoed bevriezen ("hij staat vast",
+// Derek 19-07 — de browser hing op een niet-antwoordende host).
 func NewSession() *Session {
-	return newSession(gost.New())
+	return newSession(gost.New(gost.WithHandler(netProxy{})))
+}
+
+// netProxy is het "netwerk" voor gost-dom: een http.Handler die de request
+// écht uitvoert, met een harde timeout. Zo heeft de hele browser één plek
+// voor netbeleid (straks ook: alleen-origin voor gast-apps, §10-vergezicht).
+type netProxy struct{}
+
+var netClient = &http.Client{Timeout: 20 * time.Second}
+
+func (netProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// De inkomende (server-vormige) request omzetten naar een uitgaande.
+	out, err := http.NewRequest(r.Method, r.URL.String(), r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	out.Header = r.Header.Clone()
+	resp, err := netClient.Do(out)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	for k, vs := range resp.Header {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 }
 
 // NewSessionHandler is NewSession met een in-process http.Handler in plaats
