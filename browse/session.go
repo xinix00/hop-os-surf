@@ -39,8 +39,30 @@ type Session struct {
 // site zou anders de hele event-lus voorgoed bevriezen ("hij staat vast",
 // Derek 19-07 — de browser hing op een niet-antwoordende host).
 func NewSession() *Session {
-	return newSession(gost.New(gost.WithHandler(netProxy{})))
+	return newSession(gost.New(gost.WithHandler(netProxy{}), gost.WithScriptEngine(nopEngine{})))
 }
+
+// nopEngine compileert elk script tot een no-op. Niet omdat we JS willen
+// draaien, maar omdat gost-dom v0.12 zónder engine panict op de eerste
+// pagina met een <script> (window.scriptContext is dan nil — daarom deed
+// google.nl het niet terwijl example.com het deed). Goja/V8 kan hier later
+// zo in.
+type nopEngine struct{}
+type nopHost struct{}
+type nopContext struct{}
+type nopScript struct{}
+
+func (nopEngine) NewHost(html.ScriptEngineOptions) html.ScriptHost   { return nopHost{} }
+func (nopHost) NewContext(html.BrowsingContext) html.ScriptContext   { return nopContext{} }
+func (nopHost) Close()                                               {}
+func (nopContext) Eval(string) (any, error)                          { return nil, nil }
+func (nopContext) Run(string) error                                  { return nil }
+func (nopContext) Compile(string) (html.Script, error)               { return nopScript{}, nil }
+func (nopContext) DownloadScript(string) (html.Script, error)        { return nopScript{}, nil }
+func (nopContext) DownloadModule(string) (html.Script, error)        { return nopScript{}, nil }
+func (nopContext) Close()                                            {}
+func (nopScript) Eval() (any, error)                                 { return nil, nil }
+func (nopScript) Run() error                                         { return nil }
 
 // netProxy is het "netwerk" voor gost-dom: een http.Handler die de request
 // écht uitvoert, met een harde timeout. Zo heeft de hele browser één plek
@@ -75,7 +97,7 @@ func (netProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // NewSessionHandler is NewSession met een in-process http.Handler in plaats
 // van het echte netwerk — voor de host-tests, zonder poorten of sockets.
 func NewSessionHandler(h http.Handler) *Session {
-	return newSession(gost.New(gost.WithHandler(h)))
+	return newSession(gost.New(gost.WithHandler(h), gost.WithScriptEngine(nopEngine{})))
 }
 
 func newSession(b *gost.Browser) *Session {

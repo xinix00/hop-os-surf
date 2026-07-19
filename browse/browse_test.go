@@ -72,9 +72,14 @@ func TestLayoutKetenEnNavigatie(t *testing.T) {
 
 	// Klik de link aan via de View (documentcoördinaten → windowklik).
 	v := View{Page: p}
-	href := v.Hit(link.R.Min.X+1, link.R.Min.Y+BarH+1)
+	href := v.Hit(link.R.Min.X+1, link.R.Min.Y+BarH+1, 10000)
 	if href != "/twee" {
 		t.Fatalf("Hit op de link gaf %q", href)
+	}
+	// Dezelfde klik met de statusbalk eroverheen raakt niets: de balk is
+	// van de chrome, niet van de pagina.
+	if got := v.Hit(link.R.Min.X+1, link.R.Min.Y+BarH+1, link.R.Min.Y+BarH+2); got != "" {
+		t.Fatalf("klik op de statusbalk gaf een link: %q", got)
 	}
 	if err := s.Follow(href); err != nil { // relatief: gost-dom lost op
 		t.Fatalf("Follow: %v", err)
@@ -120,10 +125,16 @@ func TestRenderEnScroll(t *testing.T) {
 		t.Fatalf("scroll niet op 0 geklemd: %d", v.Scroll)
 	}
 	big := v.Page.Height // ver voorbij het einde → klem op max
-	if v.ScrollBy(big*2, 120); v.Scroll != big-(120-BarH) {
+	if v.ScrollBy(big*2, 120); v.Scroll != big-(120-BarH-StatusH) {
 		t.Fatalf("scroll niet op max geklemd: %d (hoogte %d)", v.Scroll, big)
 	}
+	v.Status, v.Err = "ok (12ms) http://example.com", false
 	v.Render(img)
+	// De statusbalk is chrome: de onderste strook hoort balk-kleur te zijn,
+	// wat er ook aan content "onder" zit.
+	if img.RGBAAt(3, 120-StatusH+1) != colBar {
+		t.Fatalf("statusbalk niet getekend: %v", img.RGBAAt(3, 120-StatusH+1))
+	}
 }
 
 func TestStartpagina(t *testing.T) {

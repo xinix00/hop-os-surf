@@ -17,8 +17,12 @@ import (
 	"github.com/xinix00/hop-os-surf/pixel"
 )
 
-// BarH is de hoogte van de adresbalk boven de pagina.
-const BarH = 20
+// BarH is de hoogte van de adresbalk boven de pagina; StatusH die van de
+// statusbalk eronder ("wat doet hij?" — laden, fouten, klaar).
+const (
+	BarH    = 20
+	StatusH = 16
+)
 
 // Papier-look: pagina's zijn gemaakt voor zwart-op-wit; de chrome sluit aan
 // bij het instrumentenpaneel van de rest van de desktop.
@@ -31,7 +35,7 @@ var (
 	colLink   = color.RGBA{0x1A, 0x4F, 0xC4, 0xFF}
 	colCode   = color.RGBA{0x6A, 0x2A, 0x8A, 0xFF}
 	colRule   = color.RGBA{0xB0, 0xB0, 0xB8, 0xFF}
-	colErr    = color.RGBA{0xB0, 0x20, 0x20, 0xFF}
+	colErrBar = color.RGBA{0xFF, 0x8A, 0x7A, 0xFF} // fouttekst op de donkere statusbalk
 )
 
 const (
@@ -374,24 +378,23 @@ func isSpace(b byte) bool { return b == ' ' || b == '\t' || b == '\n' || b == '\
 // --- view: chrome + scroll + hit-test --------------------------------------
 
 // View is de zichtbare toestand van het browserwindow: adresbalk, de
-// gelayoute pagina en de scrollpositie. main houdt er één bij en rendert
-// hem na elk event.
+// gelayoute pagina, de scrollpositie en de statusregel. main houdt er één
+// bij en rendert hem na elk event.
 type View struct {
 	Addr   string // adresbalk-inhoud (bewerkt door toetsen)
-	Status string // laadfout of "" — verschijnt bovenaan de pagina
+	Status string // statusbalk onderin: "go …", een fout, "" = niets
+	Err    bool   // Status is een fout — kleur hem als zodanig
 	Page   Page
 	Scroll int
 }
 
-// Render tekent adresbalk + pagina over het hele beeld.
+// Render tekent adresbalk + pagina + statusbalk over het hele beeld. De
+// balken gaan als laatste over de content heen — dat ís de clipping: op de
+// statusbalk rendert nooit pagina-inhoud.
 func (v *View) Render(img *image.RGBA) {
 	b := img.Bounds()
 	pixel.Fill(img, b, colPage)
-	v.RenderBar(img)
 	y0 := b.Min.Y + BarH
-	if v.Status != "" {
-		pixel.DrawString(img, b.Min.X+pad, y0+lead, 1, colErr, v.Status)
-	}
 	for _, bx := range v.Page.Boxes {
 		top := y0 + bx.R.Min.Y - v.Scroll
 		bot := y0 + bx.R.Max.Y - v.Scroll
@@ -403,10 +406,12 @@ func (v *View) Render(img *image.RGBA) {
 			continue
 		}
 		pixel.DrawString(img, b.Min.X+bx.R.Min.X, top, bx.Scale, bx.Col, bx.Text)
-		if bx.Href != "" && bot < b.Max.Y {
+		if bx.Href != "" {
 			pixel.Fill(img, image.Rect(b.Min.X+bx.R.Min.X, bot, b.Min.X+bx.R.Max.X, bot+1), bx.Col)
 		}
 	}
+	v.RenderBar(img)
+	v.RenderStatus(img)
 }
 
 // RenderBar tekent alléén de adresbalk (voor het tik-pad: een strook van
@@ -423,16 +428,39 @@ func (v *View) RenderBar(img *image.RGBA) {
 	pixel.DrawString(img, b.Min.X+pad, b.Min.Y+(BarH-8)/2, 1, colBarTxt, txt)
 }
 
+// RenderStatus tekent alléén de statusbalk onderin (voor het laad-pad:
+// partiële damage — de pagina eronder blijft staan).
+func (v *View) RenderStatus(img *image.RGBA) {
+	r := v.StatusRect(img)
+	pixel.Fill(img, r, colBar)
+	txt := v.Status
+	if max := (r.Dx() - 2*pad) / 8; len(txt) > max && max > 0 {
+		txt = txt[:max] // begin in beeld houden: daar staat wát hij doet
+	}
+	col := colBarTxt
+	if v.Err {
+		col = colErrBar
+	}
+	pixel.DrawString(img, r.Min.X+pad, r.Min.Y+(StatusH-8)/2, 1, col, txt)
+}
+
 // Bar is de adresbalk-rechthoek in beeldcoördinaten (voor partiële Present).
 func (v *View) Bar(img *image.RGBA) image.Rectangle {
 	b := img.Bounds()
 	return image.Rect(b.Min.X, b.Min.Y, b.Max.X, b.Min.Y+BarH)
 }
 
-// Hit vertaalt een klik (window-lokale coördinaten) naar de href van de
-// link eronder; "" als daar geen link is.
-func (v *View) Hit(x, y int) string {
-	if y < BarH {
+// StatusRect is de statusbalk-rechthoek in beeldcoördinaten.
+func (v *View) StatusRect(img *image.RGBA) image.Rectangle {
+	b := img.Bounds()
+	return image.Rect(b.Min.X, b.Max.Y-StatusH, b.Max.X, b.Max.Y)
+}
+
+// Hit vertaalt een klik (window-lokale coördinaten, viewH = windowhoogte)
+// naar de href van de link eronder; "" als daar geen link is. Kliks op de
+// adres- en statusbalk zijn nooit een link.
+func (v *View) Hit(x, y, viewH int) string {
+	if y < BarH || y >= viewH-StatusH {
 		return ""
 	}
 	p := image.Pt(x, y-BarH+v.Scroll)
@@ -447,7 +475,7 @@ func (v *View) Hit(x, y int) string {
 // ScrollBy verschuift en klemt de scrollpositie voor deze viewporthoogte;
 // geeft terug of er iets veranderde (zo niet: niet hertekenen).
 func (v *View) ScrollBy(delta, viewH int) bool {
-	max := v.Page.Height - (viewH - BarH)
+	max := v.Page.Height - (viewH - BarH - StatusH)
 	if max < 0 {
 		max = 0
 	}

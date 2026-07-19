@@ -8,6 +8,7 @@ package main
 
 import (
 	"fmt"
+	"time"
 
 	"hop-os/metal/app/applib"
 	"hop-os/metal/app/applib/appnet"
@@ -59,14 +60,16 @@ func main() {
 	// worden genegeerd.
 	navDone := make(chan error, 1)
 	navBusy := false
+	var navT0 time.Time
 	startNav := func(what string, load func() error) {
 		if navBusy {
 			return
 		}
 		navBusy = true
+		navT0 = time.Now()
 		app.Logf("browser: %s", what)
-		view.Status = "loading..."
-		redraw()
+		view.Status, view.Err = what+" ...", false
+		redrawStatus(win, &view, app.Logf)
 		go func() { navDone <- load() }()
 	}
 
@@ -83,12 +86,13 @@ func main() {
 		select {
 		case err := <-navDone:
 			navBusy = false
+			ms := time.Since(navT0).Milliseconds()
 			if err != nil {
-				view.Status = err.Error()
+				view.Status, view.Err = err.Error(), true
 				app.Logf("browser: %v", err)
 			} else {
-				view.Status = ""
 				view.Scroll = 0
+				view.Status, view.Err = fmt.Sprintf("ok (%dms) %s", ms, sess.URL()), false
 			}
 			view.Addr = sess.URL()
 			view.Page = sess.Layout(win.Image().Bounds().Dx())
@@ -116,7 +120,8 @@ func main() {
 				}
 
 			case ev.Kind == surf.InputButton && ev.Value == 1:
-				href := view.Hit(int(ev.X), int(ev.Y))
+				_, h := win.Size()
+				href := view.Hit(int(ev.X), int(ev.Y), h)
 				if href == "" {
 					continue
 				}
@@ -156,6 +161,16 @@ func redrawBar(win *window.Window, view *browse.View, logf func(string, ...any))
 	img := win.Image()
 	view.RenderBar(img)
 	if err := win.Present(view.Bar(img)); err != nil {
+		logf("browser: present: %v", err)
+	}
+}
+
+// redrawStatus idem voor de statusbalk: het laden begint met één strook
+// damage onderin, niet met een vol frame.
+func redrawStatus(win *window.Window, view *browse.View, logf func(string, ...any)) {
+	img := win.Image()
+	view.RenderStatus(img)
+	if err := win.Present(view.StatusRect(img)); err != nil {
 		logf("browser: present: %v", err)
 	}
 }
