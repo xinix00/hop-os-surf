@@ -290,7 +290,12 @@ func (s *Server) serveScreen(w http.ResponseWriter, r *http.Request) {
 	s.pngMu.Lock()
 	if gen != s.pngGen || s.pngData == nil {
 		var buf bytes.Buffer
-		if err := png.Encode(&buf, img); err != nil {
+		// BestSpeed: op één (geëmuleerde) core is de default-compressie de
+		// bottleneck van de hele input-lus — elke cursorbeweging maakt het
+		// scherm vuil en dus een verse encode. Groter bestand, veel
+		// snellere display-app; LAN vindt het prima.
+		enc := png.Encoder{CompressionLevel: png.BestSpeed}
+		if err := enc.Encode(&buf, img); err != nil {
 			s.pngMu.Unlock()
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
