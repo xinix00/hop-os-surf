@@ -18,6 +18,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -43,10 +44,11 @@ pixels op het 8x8-font. Geen CSS, geen scripts &mdash; wel <i>leesbaar</i>.</p>
 
 // Session is één browservenster.
 type Session struct {
-	b    *gost.Browser
-	win  html.Window
-	imgs map[string]image.Image // gedecodeerde <img>'s van de huidige pagina, op raw src
-	nerr *netErr                // laatste transportfout uit de netProxy (nil bij handler-tests)
+	b      *gost.Browser
+	win    html.Window
+	imgs   map[string]image.Image // gedecodeerde <img>'s van de huidige pagina, op raw src
+	styles map[dom.Node]props     // computed CSS-props per element (zie loadStyles)
+	nerr   *netErr                // laatste transportfout uit de netProxy (nil bij handler-tests)
 }
 
 // NewSession start een venster op de ingebouwde startpagina. Het netwerk
@@ -214,6 +216,7 @@ func (s *Session) Go(addr string) error {
 	}
 	err := s.win.Navigate(addr)
 	if err == nil {
+		s.loadStyles()
 		s.loadImages()
 	}
 	return s.explain(err)
@@ -224,9 +227,111 @@ func (s *Session) Go(addr string) error {
 func (s *Session) Follow(href string) error {
 	err := s.win.Navigate(href)
 	if err == nil {
+		s.loadStyles()
 		s.loadImages()
 	}
 	return s.explain(err)
+}
+
+// Grenzen voor het CSS laden en matchen (zelfde gedachte als bij de
+// afbeeldingen: bare metal, begrensde heap en begrensde tijd).
+const (
+	cssMaxSheets = 4         // externe stylesheets per pagina
+	cssMaxBytes  = 256 << 10 // per sheet, over de lijn
+	cssMaxRules  = 2048      // na het wegfilteren van layout-junk
+	cssBudget    = 5 * time.Second
+)
+
+// loadStyles verzamelt de <style>-blokken en <link rel=stylesheet>-sheets,
+// parset ze tot regels en rekent per element de computed props uit: elke
+// regel één QuerySelectorAll (gost-doms selector-engine), toegepast in
+// (specificiteit, bronvolgorde) — later en specifieker wint. Draait in de
+// nav-goroutine; de layout doet daarna alleen nog map-lookups.
+func (s *Session) loadStyles() {
+	s.styles = nil
+	doc := s.win.Document()
+	base, err := url.Parse(s.win.Location().Href())
+	if err != nil {
+		return
+	}
+	var rules []cssRule
+	links := 0
+	var walk func(n dom.Node)
+	walk = func(n dom.Node) {
+		if el, ok := n.(dom.Element); ok {
+			switch strings.ToLower(el.TagName()) {
+			case "style":
+				rules = append(rules, parseCSS(n.TextContent(), len(rules))...)
+			case "link":
+				rel, _ := el.GetAttribute("rel")
+				href, _ := el.GetAttribute("href")
+				if strings.EqualFold(strings.TrimSpace(rel), "stylesheet") && href != "" && links < cssMaxSheets {
+					links++
+					rules = append(rules, parseCSS(s.fetchText(base, href), len(rules))...)
+				}
+			}
+		}
+		for c := n.FirstChild(); c != nil; c = c.NextSibling() {
+			walk(c)
+		}
+	}
+	walk(doc)
+	if len(rules) > cssMaxRules {
+		rules = rules[:cssMaxRules]
+	}
+	if len(rules) == 0 {
+		return
+	}
+	sort.SliceStable(rules, func(i, j int) bool {
+		if rules[i].spec != rules[j].spec {
+			return rules[i].spec < rules[j].spec
+		}
+		return rules[i].seq < rules[j].seq
+	})
+	styles := map[dom.Node]props{}
+	deadline := time.Now().Add(cssBudget)
+	for _, r := range rules {
+		if time.Now().After(deadline) {
+			break // liever een half gestylede pagina dan een hangende browser
+		}
+		nodes, err := doc.QuerySelectorAll(r.sel)
+		if err != nil || nodes == nil {
+			continue // selector die gost-dom niet kent: regel vervalt
+		}
+		for i := 0; i < nodes.Length(); i++ {
+			n := nodes.Item(i)
+			p := styles[n]
+			if p == nil {
+				p = props{}
+				styles[n] = p
+			}
+			for k, v := range r.decls {
+				p[k] = v
+			}
+		}
+	}
+	s.styles = styles
+}
+
+// fetchText haalt één tekst-subresource (stylesheet) begrensd op; "" bij pech.
+func (s *Session) fetchText(base *url.URL, href string) string {
+	ref, err := url.Parse(href)
+	if err != nil {
+		return ""
+	}
+	resp, err := s.b.Client.Get(base.ResolveReference(ref).String())
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, cssMaxBytes))
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 // Grenzen voor het afbeeldingen laden: dit draait straks op bare metal, en
@@ -313,9 +418,9 @@ func (s *Session) URL() string {
 }
 
 // Layout layout de huidige pagina voor deze breedte, inclusief de bij de
-// navigatie opgehaalde afbeeldingen.
+// navigatie opgehaalde afbeeldingen en CSS-props.
 func (s *Session) Layout(width int) Page {
-	return LayoutWithImages(s.win.Document().Body(), width, s.imgs)
+	return layoutStyled(s.win.Document().Body(), width, s.imgs, s.styles)
 }
 
 // hasScheme: "letters://" aan het begin. "host:7878" is géén scheme.

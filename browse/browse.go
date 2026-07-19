@@ -16,6 +16,7 @@ import (
 	"github.com/gost-dom/browser/dom"
 
 	"github.com/xinix00/hop-os-surf/pixel"
+	"github.com/xinix00/hop-os-surf/ui"
 )
 
 // BarH is de hoogte van de adresbalk boven de pagina; StatusH die van de
@@ -57,6 +58,9 @@ type Box struct {
 	Href  string      // niet-leeg: klikbaar (nog onopgeloste href uit de pagina)
 	Rule  bool        // <hr>: R vullen i.p.v. Text tekenen
 	Img   *image.RGBA // <img>: al geschaald naar R — teken i.p.v. Text
+	Bold  bool        // pseudo-vet (dubbelgetekend)
+	BG    color.RGBA  // achtergrondvlak achter de run
+	HasBG bool
 }
 
 // Page is het layout-resultaat voor één breedte; bij een resize opnieuw
@@ -66,23 +70,32 @@ type Page struct {
 	Height int // documenthoogte in pixels (voor scroll-klemmen)
 }
 
-// style is de geërfde tekststijl tijdens de DOM-wandeling.
+// style is de geërfde tekststijl tijdens de DOM-wandeling. CSS voedt
+// dezelfde velden als de tag-defaults — de cascade ís deze struct.
 type style struct {
 	scale  int
 	col    color.RGBA
 	href   string
 	indent int
 	pre    bool
+	bold   bool // pseudo-vet: glyph dubbel getekend met 1px offset
+	center bool // text-align:center / <center>
+	inline bool // in een flex/inline-context: blokken breken hier niet
+	bg     color.RGBA
+	hasBG  bool
 }
 
 type layouter struct {
-	width int
-	x, y  int // x=0 betekent: nog niets op deze regel
-	lineH int
-	boxes []Box
-	space bool // er hoort witruimte vóór het volgende woord
-	gap   int  // opgespaarde blokmarge (collapsing): pas toe bij het volgende woord
-	imgs  map[string]image.Image
+	width  int
+	x, y   int // x=0 betekent: nog niets op deze regel
+	lineH  int
+	boxes  []Box
+	space  bool // er hoort witruimte vóór het volgende woord
+	gap    int  // opgespaarde blokmarge (collapsing): pas toe bij het volgende woord
+	imgs   map[string]image.Image
+	styles map[dom.Node]props
+	line0  int  // index van de eerste box op de huidige regel (voor centreren)
+	center bool // deze regel centreren bij breakLine
 }
 
 // Layout wandelt de DOM onder body en vouwt hem tot boxes voor deze
@@ -97,7 +110,14 @@ func Layout(body dom.Node, width int) Page {
 // layout blijft puur en synchroon). Een <img> zonder plaatje valt terug op
 // zijn alt-tekst.
 func LayoutWithImages(body dom.Node, width int, imgs map[string]image.Image) Page {
-	l := &layouter{width: width, imgs: imgs}
+	return layoutStyled(body, width, imgs, nil)
+}
+
+// layoutStyled is de volledige variant: mét de computed CSS-props uit
+// Session.loadStyles. Inline style=""-attributen werken altijd, ook
+// zonder die map.
+func layoutStyled(body dom.Node, width int, imgs map[string]image.Image, styles map[dom.Node]props) Page {
+	l := &layouter{width: width, imgs: imgs, styles: styles}
 	if body != nil {
 		l.walk(body, style{scale: 1, col: colText})
 	}
@@ -159,6 +179,33 @@ func (l *layouter) element(el dom.Element, st style) {
 	if skip[tag] {
 		return
 	}
+	if _, hidden := el.GetAttribute("hidden"); hidden {
+		return
+	}
+	// Computed props (uit de stylesheets) + inline style="" (wint altijd).
+	cp := l.styles[dom.Node(el)]
+	if inline, ok := el.GetAttribute("style"); ok && inline != "" {
+		if d := parseDecls(inline); d != nil {
+			m := props{}
+			for k, v := range cp {
+				m[k] = v
+			}
+			for k, v := range d {
+				m[k] = v
+			}
+			cp = m
+		}
+	}
+	// display:none is de waardevolste property van allemaal: cookiebanners,
+	// dichtgeklapte menu's en ander verborgen vuil verdwijnen echt.
+	if cp["display"] == "none" || cp["visibility"] == "hidden" {
+		return
+	}
+	if st.inline {
+		// In een menu-context (flex/nav) hoort lucht tussen de items, ook
+		// als de bron geen witruimte heeft ("</a><a>") — flex-gap, arm.
+		l.space = true
+	}
 	switch tag {
 	case "br":
 		l.breakLine()
@@ -189,13 +236,13 @@ func (l *layouter) element(el dom.Element, st style) {
 
 	switch tag {
 	case "h1":
-		st.scale, st.col = 3, colBold
+		st.scale, st.col, st.bold = 3, colBold, true
 	case "h2":
-		st.scale, st.col = 2, colBold
+		st.scale, st.col, st.bold = 2, colBold, true
 	case "h3":
-		st.scale, st.col = 2, colBold
+		st.scale, st.col, st.bold = 2, colBold, true
 	case "h4", "h5", "h6", "b", "strong", "th":
-		st.col = colBold
+		st.col, st.bold = colBold, true
 	case "a":
 		if href, ok := el.GetAttribute("href"); ok && href != "" {
 			st.href, st.col = href, colLink
@@ -206,19 +253,91 @@ func (l *layouter) element(el dom.Element, st style) {
 		st.pre, st.col = true, colCode
 	case "ul", "ol", "blockquote", "dd":
 		st.indent += inset
+	case "center":
+		st.center = true
+	case "mark":
+		st.bg, st.hasBG = namedColors["gold"], true
+	case "font": // oud web: <font color="...">
+		if v, ok := el.GetAttribute("color"); ok {
+			if c, ok := cssColor(strings.ToLower(v)); ok {
+				st.col = c
+			}
+		}
+	}
+	// Ook oud web: bgcolor-attribuut (tabellen, body's van vroeger).
+	if v, ok := el.GetAttribute("bgcolor"); ok {
+		if c, ok := cssColor(strings.ToLower(v)); ok {
+			st.bg, st.hasBG = c, true
+		}
 	}
 
-	if blocks[tag] {
+	// CSS over de tag-defaults heen (auteur wint van onze "UA-stylesheet").
+	if v, ok := cp["color"]; ok {
+		if c, ok := cssColor(v); ok {
+			st.col = c
+		}
+	}
+	if v, ok := cp["background-color"]; ok {
+		if c, ok := cssColor(v); ok {
+			st.bg, st.hasBG = c, true
+		}
+	}
+	if v, ok := cp["font-weight"]; ok {
+		if b, known := boldWeight(v); known {
+			st.bold = b
+		}
+	}
+	if v, ok := cp["font-size"]; ok {
+		st.scale = fontScale(v, st.scale)
+	}
+	if v, ok := cp["text-align"]; ok {
+		st.center = v == "center"
+	}
+
+	// "Divs goed zetten": display:inline(-block) haalt een element uit de
+	// blok-flow, en de kinderen van een flex/grid-container komen náást
+	// elkaar in plaats van onder elkaar — precies genoeg voor menu's,
+	// zonder een echte layout-engine te worden.
+	isBlock := blocks[tag] && !st.inline
+	switch cp["display"] {
+	case "inline", "inline-block", "inline-flex":
+		isBlock = false
+	case "block", "list-item":
+		isBlock = !st.inline
+	}
+	childSt := st
+	switch cp["display"] {
+	case "flex", "grid", "inline-flex":
+		childSt.inline = true
+	}
+	if tag == "nav" {
+		// UA-vooroordeel: een <nav> ís vrijwel altijd een menu — leg hem
+		// plat, ook zonder stylesheet (die staat vol properties die wij
+		// toch niet dragen).
+		childSt.inline = true
+	}
+
+	// Een blok dat inline gezet is (flex-kind, display:inline-li) krijgt
+	// lucht om zich heen in plaats van een regelbreuk.
+	inlined := blocks[tag] && !isBlock
+
+	if isBlock {
 		l.blockGap(blockMargin(tag, st.scale))
 	}
-	if tag == "li" {
+	if tag == "li" && isBlock {
 		l.word("-", st)
 		l.space = true
 	}
-	for c := el.FirstChild(); c != nil; c = c.NextSibling() {
-		l.walk(c, st)
+	if inlined {
+		l.space = true
 	}
-	if blocks[tag] {
+	for c := el.FirstChild(); c != nil; c = c.NextSibling() {
+		l.walk(c, childSt)
+	}
+	if inlined {
+		l.space = true
+	}
+	if isBlock {
 		l.blockGap(blockMargin(tag, st.scale))
 	}
 }
@@ -304,12 +423,16 @@ func (l *layouter) word(w string, st style) {
 		Scale: st.scale,
 		Col:   st.col,
 		Href:  st.href,
+		Bold:  st.bold,
+		BG:    st.bg,
+		HasBG: st.hasBG,
 	})
 	l.x = x + ww
 	if h := 8 * st.scale; h > l.lineH {
 		l.lineH = h
 	}
 	l.space = false
+	l.center = l.center || st.center
 }
 
 // image plaatst een afbeelding in de flow, als een (groot) woord: past hij
@@ -355,6 +478,7 @@ func (l *layouter) image(m image.Image, st style) {
 		l.lineH = h
 	}
 	l.space = false
+	l.center = l.center || st.center
 }
 
 // scaleTo schaalt src naar w×h met nearest-neighbor: geen extra dependency,
@@ -401,14 +525,27 @@ func (l *layouter) preText(txt string, st style) {
 	}
 }
 
-// breakLine sluit de huidige regel af (no-op op een lege regel).
+// breakLine sluit de huidige regel af (no-op op een lege regel) en
+// centreert hem als er gecentreerde content op stond — centreren kán pas
+// hier, als de regelbreedte bekend is.
 func (l *layouter) breakLine() {
 	if l.x == 0 {
 		return
 	}
+	if l.center {
+		if shift := (l.width - pad - l.x) / 2; shift > 0 {
+			for i := l.line0; i < len(l.boxes); i++ {
+				if l.boxes[i].R.Min.Y == l.y { // <hr> e.d. niet meeschuiven
+					l.boxes[i].R = l.boxes[i].R.Add(image.Pt(shift, 0))
+				}
+			}
+		}
+	}
 	l.y += l.lineH + lead
 	l.x, l.lineH = 0, 0
 	l.space = false
+	l.line0 = len(l.boxes)
+	l.center = false
 }
 
 // blockGap vraagt om verticale marge; opeenvolgende blokken delen de
@@ -438,6 +575,7 @@ func merge(in []Box) []Box {
 			p := &out[n-1]
 			if !p.Rule && !b.Rule && p.Img == nil && b.Img == nil &&
 				p.Scale == b.Scale && p.Col == b.Col && p.Href == b.Href &&
+				p.Bold == b.Bold && p.HasBG == b.HasBG && p.BG == b.BG &&
 				p.R.Min.Y == b.R.Min.Y && p.R.Max.X+8*p.Scale == b.R.Min.X {
 				p.Text += " " + b.Text
 				p.R.Max.X = b.R.Max.X
@@ -487,7 +625,17 @@ func (v *View) Render(img *image.RGBA) {
 			draw.Draw(img, r, bx.Img, bx.Img.Bounds().Min, draw.Over)
 			continue
 		}
+		if bx.HasBG {
+			// 1px lucht rondom: leest prettiger en dekt de spatie in een
+			// samengevoegde run.
+			pixel.Fill(img, image.Rect(b.Min.X+bx.R.Min.X-1, top-1, b.Min.X+bx.R.Max.X+1, bot+1), bx.BG)
+		}
 		pixel.DrawString(img, b.Min.X+bx.R.Min.X, top, bx.Scale, bx.Col, bx.Text)
+		if bx.Bold {
+			// Pseudo-vet: het 8x8-font heeft geen gewichten — dubbel
+			// tekenen met 1px offset is er verrassend dichtbij.
+			pixel.DrawString(img, b.Min.X+bx.R.Min.X+1, top, bx.Scale, bx.Col, bx.Text)
+		}
 		if bx.Href != "" {
 			pixel.Fill(img, image.Rect(b.Min.X+bx.R.Min.X, bot, b.Min.X+bx.R.Max.X, bot+1), bx.Col)
 		}
@@ -597,57 +745,7 @@ func (v *View) ScrollBy(delta, viewH int) bool {
 
 // --- toetsen ----------------------------------------------------------------
 
-// Rune vertaalt een web-KVM-keyCode (plus shift-stand) naar een teken voor
-// de adresbalk; 0 = geen teken (Enter/Backspace/Shift gaan buitenom).
-func Rune(code uint32, shift bool) byte {
-	switch {
-	case code >= 'A' && code <= 'Z':
-		if shift {
-			return byte(code)
-		}
-		return byte(code) + 'a' - 'A'
-	case code >= '0' && code <= '9':
-		if shift {
-			// US-layout: shift-cijfers die in URL's voorkomen.
-			switch code {
-			case '3':
-				return '#'
-			case '5':
-				return '%'
-			case '7':
-				return '&'
-			}
-			return 0
-		}
-		return byte(code)
-	case code >= 96 && code <= 105: // numpad
-		return byte(code-96) + '0'
-	}
-	switch code {
-	case 186: // ; / :
-		if shift {
-			return ':'
-		}
-		return ';'
-	case 187: // = / +
-		if shift {
-			return '+'
-		}
-		return '='
-	case 189: // - / _
-		if shift {
-			return '_'
-		}
-		return '-'
-	case 190, 110: // . (en numpad-punt)
-		return '.'
-	case 191: // / / ?
-		if shift {
-			return '?'
-		}
-		return '/'
-	case 222: // ' / "
-		return '\''
-	}
-	return 0
-}
+// Rune vertaalt een web-KVM-keyCode naar een teken voor de adresbalk.
+// Woont sinds de basis-toolset in ui (elke typende app dezelfde vertaling);
+// deze naam blijft omdat hij bij de adresbalk hoort.
+func Rune(code uint32, shift bool) byte { return ui.Rune(code, shift) }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/x509"
 	"image"
+	"image/color"
 	"image/png"
 	"net/http"
 	"strings"
@@ -246,6 +247,162 @@ func TestAfbeeldingen(t *testing.T) {
 	at := img.RGBAAt(logo.R.Min.X+5, BarH+logo.R.Min.Y+5)
 	if at.R != 0xFF || at.G != 0xFF || at.B != 0xFF {
 		t.Fatalf("logo-pixels niet gerenderd: %v", at)
+	}
+}
+
+func TestCSS(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<html><head>
+<style>
+/* commentaar hoort weg te vallen */
+.rood { color: #c00; }
+.balk { background-color: rgb(255, 235, 59); }
+#weg, .cookie { display: none; }
+h1 { text-align: center; }
+p { color: green; font-weight: bold; }
+p { color: navy; } /* zelfde specificiteit, later wint */
+@media print { p { color: black } }
+</style>
+<link rel="stylesheet" href="/extra.css">
+</head><body>
+<h1>Kop</h1>
+<p>alinea</p>
+<span class="rood">waarschuwing</span>
+<span class="balk">gemarkeerd</span>
+<div id="weg">cookiebanner</div>
+<div class="cookie">nog een banner</div>
+<div hidden>attribuut-verborgen</div>
+<b style="color: purple">inline-paars</b>
+<span class="extern">uit-extern-blad</span>
+</body></html>`))
+	})
+	mux.HandleFunc("/extra.css", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`.extern { color: teal; font-size: 24px; }`))
+	})
+
+	s := NewSessionHandler(mux)
+	if err := s.Go("example.com"); err != nil {
+		t.Fatalf("Go: %v", err)
+	}
+	p := s.Layout(480)
+
+	if b := find(p, "waarschuwing"); b == nil || b.Col != (color.RGBA{0xCC, 0x00, 0x00, 0xFF}) {
+		t.Fatalf("class-kleur (#c00) niet toegepast: %+v", b)
+	}
+	if b := find(p, "gemarkeerd"); b == nil || !b.HasBG || b.BG != (color.RGBA{255, 235, 59, 0xFF}) {
+		t.Fatalf("background-color (rgb) niet toegepast: %+v", b)
+	}
+	for _, weg := range []string{"cookiebanner", "nog een banner", "attribuut-verborgen"} {
+		if find(p, weg) != nil {
+			t.Fatalf("%q had verborgen moeten zijn", weg)
+		}
+	}
+	if b := find(p, "alinea"); b == nil || b.Col != (color.RGBA{0x00, 0x00, 0x80, 0xFF}) || !b.Bold {
+		t.Fatalf("p-regel (navy wint van green, bold): %+v", b)
+	}
+	if b := find(p, "inline-paars"); b == nil || b.Col != (color.RGBA{0x80, 0x00, 0x80, 0xFF}) || !b.Bold {
+		t.Fatalf("inline style hoort te winnen, <b> hoort vet te blijven: %+v", b)
+	}
+	if b := find(p, "uit-extern-blad"); b == nil || b.Col != (color.RGBA{0x00, 0x80, 0x80, 0xFF}) || b.Scale != 3 {
+		t.Fatalf("extern stylesheet (teal, 24px→schaal 3) niet toegepast: %+v", b)
+	}
+	kop := find(p, "Kop")
+	if kop == nil || kop.R.Min.X <= pad+8 {
+		t.Fatalf("h1 niet gecentreerd: %+v", kop)
+	}
+}
+
+func TestMenuOpEenRegel(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<html><head><style>
+.menu { display: flex; }
+ul.inl li { display: inline; }
+</style></head><body>
+<nav><a href="/a">Home</a><a href="/b">Docs</a><a href="/c">Over</a></nav>
+<div class="menu"><div>Een</div><div>Twee</div><div>Drie</div></div>
+<ul class="inl"><li>x</li><li>y</li></ul>
+<p>gewone alinea eronder</p>
+</body></html>`))
+	})
+	s := NewSessionHandler(mux)
+	if err := s.Go("example.com"); err != nil {
+		t.Fatalf("Go: %v", err)
+	}
+	p := s.Layout(480)
+
+	sameLine := func(a, b string) {
+		t.Helper()
+		ba, bb := find(p, a), find(p, b)
+		if ba == nil || bb == nil {
+			t.Fatalf("%q of %q niet gevonden", a, b)
+		}
+		if ba == bb {
+			return // tot één run samengevoegd: per definitie op één regel
+		}
+		if ba.R.Min.Y != bb.R.Min.Y {
+			t.Fatalf("%q en %q horen op één regel: %+v vs %+v", a, b, ba, bb)
+		}
+		if bb.R.Min.X <= ba.R.Max.X {
+			t.Fatalf("%q hoort rechts van %q (met lucht): %+v vs %+v", b, a, bb, ba)
+		}
+	}
+	sameLine("Home", "Docs") // <nav>: UA-vooroordeel
+	sameLine("Docs", "Over")
+	sameLine("Een", "Twee") // display:flex
+	sameLine("x", "y")      // li display:inline (en zonder streepjes)
+	if find(p, "-") != nil {
+		t.Fatal("inline li hoort geen '-'-bullet te krijgen")
+	}
+	menu := find(p, "Drie")
+	onder := find(p, "gewone alinea eronder")
+	if onder == nil || menu == nil || onder.R.Min.Y <= menu.R.Min.Y {
+		t.Fatalf("de alinea hoort ónder het menu: %+v vs %+v", onder, menu)
+	}
+}
+
+func TestParseCSS(t *testing.T) {
+	rules := parseCSS(`a { color: red; margin: 4px } /* junk */ b,i{font-weight:700}
+@media screen { .x { color: blue } } .leeg { margin: 0 }`, 0)
+	// a (color), b en i (font-weight); .leeg (alleen margin) en de
+	// @media-inhoud vallen weg.
+	if len(rules) != 3 {
+		t.Fatalf("wil 3 regels, kreeg %d: %+v", len(rules), rules)
+	}
+	if rules[0].decls["color"] != "red" || rules[0].decls["margin"] != "" {
+		t.Fatalf("a-regel klopt niet: %+v", rules[0])
+	}
+	if rules[1].sel != "b" || rules[2].sel != "i" {
+		t.Fatalf("selector-groep niet gesplitst: %+v", rules[1:])
+	}
+	if b, _ := boldWeight(rules[1].decls["font-weight"]); !b {
+		t.Fatalf("700 hoort vet te zijn")
+	}
+	if specificity("#a .b c") <= specificity(".b c") || specificity(".b c") <= specificity("c") {
+		t.Fatal("specificiteit niet oplopend id > class > tag")
+	}
+}
+
+func TestCSSKleur(t *testing.T) {
+	cases := []struct {
+		in   string
+		want color.RGBA
+		ok   bool
+	}{
+		{"#fff", color.RGBA{0xFF, 0xFF, 0xFF, 0xFF}, true},
+		{"#1a4fc4", color.RGBA{0x1A, 0x4F, 0xC4, 0xFF}, true},
+		{"rgb(16, 32, 48)", color.RGBA{16, 32, 48, 0xFF}, true},
+		{"rgba(16,32,48,0.5)", color.RGBA{16, 32, 48, 0xFF}, true},
+		{"red", color.RGBA{0xFF, 0x00, 0x00, 0xFF}, true},
+		{"transparent", color.RGBA{}, false},
+		{"var(--x)", color.RGBA{}, false},
+	}
+	for _, c := range cases {
+		got, ok := cssColor(c.in)
+		if ok != c.ok || (ok && got != c.want) {
+			t.Errorf("cssColor(%q) = %v,%v; wil %v,%v", c.in, got, ok, c.want, c.ok)
+		}
 	}
 }
 
