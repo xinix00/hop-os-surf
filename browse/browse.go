@@ -63,10 +63,12 @@ type Box struct {
 	Rule  bool        // <hr>: R vullen i.p.v. Text tekenen
 	Img   *image.RGBA // <img>: al geschaald naar R — teken i.p.v. Text
 	Tile  *image.RGBA // background-image: herhaald over R (tegels — nooit een reuze-alloc)
-	Bold  bool        // pseudo-vet (dubbelgetekend)
-	BG    color.RGBA  // achtergrondvlak achter de run (of het blok)
-	HasBG bool
-	Field int // >0: invoerveld/knop — index+1 in Page.Fields
+	Bold   bool       // pseudo-vet (dubbelgetekend)
+	BG     color.RGBA // achtergrondvlak achter de run (of het blok)
+	HasBG  bool
+	Border color.RGBA // blokrand (kaarten, panelen)
+	HasBrd bool
+	Field  int // >0: invoerveld/knop — index+1 in Page.Fields
 }
 
 // Field is één formulierveld of -knop op de pagina. De waarde leeft in de
@@ -94,12 +96,13 @@ type style struct {
 	col    color.RGBA
 	href   string
 	indent int
-	pre    bool
-	bold   bool // pseudo-vet: glyph dubbel getekend met 1px offset
-	center bool // text-align:center / <center>
-	inline bool // in een flex/inline-context: blokken breken hier niet
-	bg     color.RGBA
-	hasBG  bool
+	pre      bool
+	bold     bool // pseudo-vet: glyph dubbel getekend met 1px offset
+	center   bool // text-align:center / <center>
+	inline   bool // in een flex/inline-context: blokken breken hier niet
+	blockify bool // direct kind van een grid/flex-kolom: word een blok (ook een <a>)
+	bg       color.RGBA
+	hasBG    bool
 }
 
 type layouter struct {
@@ -334,20 +337,29 @@ func (l *layouter) element(el dom.Element, st style) {
 	// blok-flow, en de kinderen van een flex/grid-container komen náást
 	// elkaar in plaats van onder elkaar — precies genoeg voor menu's,
 	// zonder een echte layout-engine te worden.
-	isBlock := blocks[tag] && !st.inline
+	isBlock := (blocks[tag] || st.blockify) && !st.inline
 	switch cp["display"] {
 	case "inline", "inline-block", "inline-flex":
 		isBlock = false
 	case "block", "list-item":
 		isBlock = !st.inline
 	}
-	// childInline: krijgen de kínderen een inline-context? (De childSt
-	// zelf wordt pas ná de CSS-toepassing gekopieerd — kinderen horen de
-	// gecascadeerde stijl te erven.)
+	// childInline: krijgen de kínderen een inline-context (menu), en
+	// childBlockify: worden ze juist blokken (kaarten)? Flex-rij = menu;
+	// grid en flex-kolom = blokken onder elkaar — gethops .doors-kaarten
+	// stapelen dan net als bij hun eigen mobiele breakpoint, en een
+	// <a class=door> wordt daarbij geblokkificeerd zoals in echte CSS.
 	childInline := st.inline
+	childBlockify := false
 	switch cp["display"] {
-	case "flex", "grid", "inline-flex":
-		childInline = true
+	case "flex", "inline-flex":
+		if fd := cp["flex-direction"]; fd == "column" || fd == "column-reverse" {
+			childBlockify = true
+		} else {
+			childInline = true
+		}
+	case "grid":
+		childBlockify = true
 	}
 	if tag == "nav" {
 		// UA-vooroordeel: een <nav> ís vrijwel altijd een menu — leg hem
@@ -360,18 +372,31 @@ func (l *layouter) element(el dom.Element, st style) {
 	// lucht om zich heen in plaats van een regelbreuk.
 	inlined := blocks[tag] && !isBlock
 
-	// Blok-achtergrond: één vlak (of tegelpatroon) achter het hele blok —
-	// body-achtergrond wordt zo vanzelf de paginakleur. Het vlak gaat als
-	// placeholder de boxlijst in (paint-volgorde: onder de inhoud) en
-	// krijgt zijn rechthoek als de blokhoogte bekend is.
+	// Border: uit de CSS (border/border-color); "none"/"0" is uit.
+	var brdCol color.RGBA
+	hasBrd := false
+	if v, ok := cp["border"]; ok {
+		brdCol, hasBrd = cssBorder(v)
+	}
+	if v, ok := cp["border-color"]; ok {
+		if c, ok := cssColor(v); ok {
+			brdCol, hasBrd = c, true
+		}
+	}
+
+	// Blok-achtergrond en/of -rand: één vlak (of tegelpatroon) achter het
+	// hele blok — body-achtergrond wordt zo vanzelf de paginakleur. Het
+	// vlak gaat als placeholder de boxlijst in (paint-volgorde: onder de
+	// inhoud) en krijgt zijn rechthoek als de blokhoogte bekend is. Een
+	// gekaderd blok (kaart) krijgt binnenmarge, anders plakt de tekst aan
+	// de rand.
 	bgIdx := -1
-	var bgY0 int
-	if tile := l.imgs[cssURL(cp["background-image"])]; (isBlock || tag == "body") && (st.hasBG || tile != nil) {
+	var bgY0, bgX0 int
+	if tile := l.imgs[cssURL(cp["background-image"])]; (isBlock || tag == "body") && (st.hasBG || tile != nil || hasBrd) {
 		l.breakLine()
 		l.flushGap()
 		bgIdx = len(l.boxes)
-		bgY0 = l.y
-		box := Box{BG: st.bg, HasBG: st.hasBG}
+		box := Box{BG: st.bg, HasBG: st.hasBG, Border: brdCol, HasBrd: hasBrd}
 		if tile != nil {
 			w, h := tile.Bounds().Dx(), tile.Bounds().Dy()
 			if w > 0 && h > 0 && w <= imgMaxDim && h <= imgMaxDim {
@@ -379,11 +404,20 @@ func (l *layouter) element(el dom.Element, st style) {
 			}
 		}
 		l.boxes = append(l.boxes, box)
+		bgY0 = l.y
+		bgX0 = pad + st.indent - 2
+		if tag == "body" {
+			bgX0 = 0
+		} else {
+			l.y += 4 // binnenmarge boven
+			st.indent += 6
+		}
 		st.hasBG = false // de kinderen liggen al óp het vlak: geen run-vulling meer nodig
 	}
 
 	childSt := st
 	childSt.inline = childInline
+	childSt.blockify = childBlockify
 
 	if isBlock {
 		l.blockGap(blockMargin(tag, st.scale))
@@ -406,11 +440,15 @@ func (l *layouter) element(el dom.Element, st style) {
 	}
 	if bgIdx >= 0 {
 		l.breakLine()
-		x0, x1 := pad+st.indent-2, l.width-pad+2
+		x1 := l.width - pad + 2
 		if tag == "body" {
-			x0, x1 = 0, l.width
+			x1 = l.width
+		} else {
+			l.y += 4 // binnenmarge onder
 		}
-		l.boxes[bgIdx].R = image.Rect(x0, bgY0-2, x1, l.y+2)
+		// Verticaal exact de blokgrenzen: de binnenmarge zit er al in, en
+		// ±2 zou aangrenzende kaarten laten overlappen.
+		l.boxes[bgIdx].R = image.Rect(bgX0, bgY0, x1, l.y)
 	}
 }
 
@@ -782,18 +820,26 @@ func (v *View) Render(img *image.RGBA) {
 			v.renderField(img, &bx, top, bot)
 			continue
 		}
-		if bx.Tile != nil {
-			// Blok-achtergrond: eerst de kleur, dan het tegelpatroon.
+		if bx.Tile != nil || bx.HasBrd {
+			// Blok-achtergrond: kleur, dan tegelpatroon, dan de rand.
 			r := image.Rect(b.Min.X+bx.R.Min.X, top, b.Min.X+bx.R.Max.X, bot)
 			if bx.HasBG {
 				pixel.Fill(img, r, bx.BG)
 			}
-			tw, th := bx.Tile.Bounds().Dx(), bx.Tile.Bounds().Dy()
-			for ty := r.Min.Y; ty < r.Max.Y; ty += th {
-				for tx := r.Min.X; tx < r.Max.X; tx += tw {
-					dst := image.Rect(tx, ty, tx+tw, ty+th).Intersect(r)
-					draw.Draw(img, dst, bx.Tile, bx.Tile.Bounds().Min, draw.Over)
+			if bx.Tile != nil {
+				tw, th := bx.Tile.Bounds().Dx(), bx.Tile.Bounds().Dy()
+				for ty := r.Min.Y; ty < r.Max.Y; ty += th {
+					for tx := r.Min.X; tx < r.Max.X; tx += tw {
+						dst := image.Rect(tx, ty, tx+tw, ty+th).Intersect(r)
+						draw.Draw(img, dst, bx.Tile, bx.Tile.Bounds().Min, draw.Over)
+					}
 				}
+			}
+			if bx.HasBrd {
+				// Niet clippen naar het beeld: SetRGBA buiten beeld is al
+				// een no-op, en clippen zou valse randen op de snijlijn
+				// tekenen bij een half-zichtbaar blok.
+				pixel.Outline(img, r, bx.Border)
 			}
 			continue
 		}

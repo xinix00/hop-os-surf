@@ -26,10 +26,27 @@ func supportedProp(p string) bool {
 	}
 	switch p {
 	case "display", "visibility", "color", "background-color", "background",
-		"background-image", "font-weight", "font-size", "text-align":
+		"background-image", "font-weight", "font-size", "text-align",
+		"border", "border-color", "flex-direction":
 		return true
 	}
 	return false
+}
+
+// cssBorder leest een border(-color)-waarde: aan/uit plus de kleur (grijs
+// als er alleen "1px solid" staat). "none", "0" en varianten zijn uit.
+func cssBorder(v string) (color.RGBA, bool) {
+	if v == "" || v == "none" || v == "0" || strings.HasPrefix(v, "0 ") ||
+		strings.HasPrefix(v, "0px") || strings.Contains(v, "none") {
+		return color.RGBA{}, false
+	}
+	col := colRule // default: de rustige grijze lijn
+	for _, tok := range strings.Fields(v) {
+		if c, ok := cssColor(tok); ok {
+			col = c
+		}
+	}
+	return col, true
 }
 
 // cssRule is één selector met zijn declaraties, klaar om te matchen.

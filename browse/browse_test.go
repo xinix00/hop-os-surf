@@ -468,6 +468,61 @@ body { background: var(--bg); color: white; }
 	}
 }
 
+func TestGridKaarten(t *testing.T) {
+	// gethop-vormig: een grid met twee <a class=door>-kaarten, elk met
+	// achtergrond en rand. De kaarten horen onder elkaar (mobiele
+	// breakpoint), elk met een vlak + rand, en de tekst met binnenmarge.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<html><head><style>
+.doors { display: grid; grid-template-columns: 1fr 1fr; }
+.door { background: #1c2430; border: 1px solid #3a4a6a; color: white; }
+.naked { border: none; }
+</style></head><body>
+<div class="doors">
+<a class="door" href="/hopos/">HopOS kaart</a>
+<a class="door" href="/hop/">HOP kaart</a>
+</div>
+<p class="naked">gewoon</p>
+</body></html>`))
+	})
+	s := NewSessionHandler(mux)
+	if err := s.Go("example.com"); err != nil {
+		t.Fatalf("Go: %v", err)
+	}
+	p := s.Layout(480)
+
+	een, twee := find(p, "HopOS kaart"), find(p, "HOP kaart")
+	if een == nil || twee == nil {
+		t.Fatal("kaartteksten niet gevonden")
+	}
+	if een.R.Min.Y == twee.R.Min.Y {
+		t.Fatalf("kaarten horen onder elkaar: %v vs %v", een.R, twee.R)
+	}
+	var vlakken []*Box
+	for i := range p.Boxes {
+		b := &p.Boxes[i]
+		if b.HasBrd {
+			vlakken = append(vlakken, b)
+		}
+	}
+	if len(vlakken) != 2 {
+		t.Fatalf("wil 2 gekaderde vlakken, kreeg %d", len(vlakken))
+	}
+	for _, vl := range vlakken {
+		if vl.Border != (color.RGBA{0x3A, 0x4A, 0x6A, 0xFF}) || !vl.HasBG {
+			t.Fatalf("vlak zonder rand/achtergrond: %+v", vl)
+		}
+	}
+	// Binnenmarge: de kaarttekst begint rechts van en onder de vlakrand.
+	if !een.R.In(vlakken[0].R) || een.R.Min.X-vlakken[0].R.Min.X < 4 || een.R.Min.Y-vlakken[0].R.Min.Y < 4 {
+		t.Fatalf("kaarttekst zonder binnenmarge: tekst=%v vlak=%v", een.R, vlakken[0].R)
+	}
+	if len(vlakken) == 2 && vlakken[1].R.Overlaps(vlakken[0].R) {
+		t.Fatalf("kaartvlakken overlappen: %v vs %v", vlakken[0].R, vlakken[1].R)
+	}
+}
+
 func TestParseCSS(t *testing.T) {
 	rules := parseCSS(`a { color: red; margin: 4px } /* junk */ b,i{font-weight:700}
 @media screen { .x { color: blue } } .leeg { margin: 0 }`, 0)
