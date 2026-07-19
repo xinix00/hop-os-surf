@@ -1,0 +1,211 @@
+// Package window is de app-kant van SURF (docs/gui-ontwerp.md §3): teken in
+// een image.RGBA, Present(), klaar. De verbinding herstelt zichzelf — valt
+// de display-node weg (of failovert de app zelf en komt hij elders terug),
+// dan herverbindt Present met HELLO+CREATE en een vol frame; het window
+// verschijnt vanzelf opnieuw. Bewust niet aan applib gekoppeld: alleen
+// stdlib + surf, zodat het op de ontwikkelmachine integraal testbaar is.
+package window
+
+import (
+	"errors"
+	"image"
+	"net"
+	"sync"
+	"time"
+
+	"github.com/xinix00/hop-os-surf/surf"
+)
+
+var errClosed = errors.New("window: session lost")
+
+// Event is één input-event van de display (zie surf.Input*-kinds).
+type Event struct {
+	Kind  uint8
+	Code  uint32
+	Value int32
+	X, Y  uint16
+}
+
+// Window is één surface op een display-node.
+type Window struct {
+	addr, name string
+	w, h       int
+	img        *image.RGBA
+	logf       func(string, ...any)
+
+	mu      sync.Mutex
+	conn    net.Conn
+	dead    bool // leesgoroutine zag de verbinding sterven
+	frame   uint32
+	scratch []byte // wire-conversiebuffer (RGBA → XRGB8888)
+	events  chan Event
+}
+
+// Open verbindt met een display-node (addr = host:poort, doorgaans uit de
+// jobspec-env SURF_ADDR) en maakt daar een w×h-window aan. name is de
+// windowtitel — zet er je herkomst in ("clock @ node-b"): het cluster hoort
+// zichtbaar te zijn in de chrome. logf mag nil zijn.
+func Open(addr, name string, w, h int, logf func(string, ...any)) (*Window, error) {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	win := &Window{
+		addr: addr, name: name, w: w, h: h,
+		img:     image.NewRGBA(image.Rect(0, 0, w, h)),
+		logf:    logf,
+		scratch: make([]byte, w*h*4),
+		events:  make(chan Event, 64),
+	}
+	if err := win.connect(); err != nil {
+		return nil, err
+	}
+	return win, nil
+}
+
+// Image is het tekenvlak: teken erin en roep Present aan.
+func (win *Window) Image() *image.RGBA { return win.img }
+
+// Events levert input van de display (toetsen/muis in lokale window-
+// coördinaten). Bij een overvolle buffer vallen oude events weg — input is
+// een verse-waarde-stroom, geen log.
+func (win *Window) Events() <-chan Event { return win.events }
+
+// Present maakt de huidige Image-inhoud atomisch zichtbaar. V1 stuurt het
+// volle frame als één DAMAGE (damage-rects komen als het meten daarom
+// vraagt). Bij een kapotte verbinding blokkeert Present tot de display terug
+// is — een GUI-app zonder display heeft toch niets te doen.
+//
+// Semantiek is at-most-once per aanroep: een breuk die pas ná de write
+// zichtbaar wordt (TCP-buffer) kan één frame kosten, maar de leesgoroutine
+// markeert de sessie dood en de eerstvolgende Present herverbindt en stuurt
+// sowieso een vol frame — een app die blijft presenteren heelt zichzelf.
+// Present is bedoeld voor één tekenende goroutine.
+func (win *Window) Present() error {
+	for {
+		err := win.present()
+		if err == nil {
+			return nil
+		}
+		win.logf("window: display lost (%v), reconnecting", err)
+		for {
+			time.Sleep(500 * time.Millisecond)
+			if err := win.connect(); err == nil {
+				break
+			}
+		}
+	}
+}
+
+func (win *Window) present() error {
+	win.mu.Lock()
+	conn, dead := win.conn, win.dead
+	win.mu.Unlock()
+	if dead {
+		return errClosed
+	}
+	// RGBA → wire (XRGB8888 little-endian): de enige kopie aan de zendkant.
+	pix := win.img.Pix
+	for i := 0; i < win.w*win.h; i++ {
+		win.scratch[i*4+0] = pix[i*4+2]
+		win.scratch[i*4+1] = pix[i*4+1]
+		win.scratch[i*4+2] = pix[i*4+0]
+		win.scratch[i*4+3] = 0
+	}
+	win.frame++
+	d := surf.Damage{Frame: win.frame, W: uint16(win.w), H: uint16(win.h)}
+	if err := surf.WriteDamage(conn, 1, d, win.scratch); err != nil {
+		return err
+	}
+	return surf.WriteMsg(conn, surf.TypePresent, 1, surf.Present{Frame: win.frame}.Encode())
+}
+
+// connect zet (opnieuw) een sessie op: HELLO + CREATE, en de leesgoroutine
+// voor input. Surface-id is altijd 1 — één window per Window.
+func (win *Window) connect() error {
+	conn, err := net.DialTimeout("tcp", win.addr, 5*time.Second)
+	if err != nil {
+		return err
+	}
+	// Token: v0-stub (nullen); verificatie hangt later aan de clustersleutels.
+	hello := surf.Hello{Version: surf.Version, App: win.name}
+	if err := surf.WriteMsg(conn, surf.TypeHello, 0, hello.Encode()); err != nil {
+		conn.Close()
+		return err
+	}
+	create := surf.Create{W: uint16(win.w), H: uint16(win.h), Format: surf.FormatXRGB8888}
+	if err := surf.WriteMsg(conn, surf.TypeCreate, 1, create.Encode()); err != nil {
+		conn.Close()
+		return err
+	}
+	win.mu.Lock()
+	if win.conn != nil {
+		win.conn.Close() // oude leesgoroutine stopt op de leesfout
+	}
+	win.conn = conn
+	win.dead = false
+	win.mu.Unlock()
+	go win.readLoop(conn)
+	return nil
+}
+
+// markDead meldt dat conn stierf; alleen als het nog de actieve sessie is
+// (een oudere leesgoroutine mag een verse verbinding niet doodverklaren).
+func (win *Window) markDead(conn net.Conn) {
+	win.mu.Lock()
+	if win.conn == conn {
+		win.dead = true
+	}
+	win.mu.Unlock()
+}
+
+// readLoop zet inkomende INPUT om in Events; CONFIGURE wordt in v1 bevestigd
+// ontvangen maar genegeerd (vaste windowmaat), onbekende types ook
+// (forward-compatibel: een nieuwere display mag meer sturen).
+func (win *Window) readLoop(conn net.Conn) {
+	var buf []byte
+	var h surf.Header
+	var err error
+	defer win.markDead(conn)
+	for {
+		h, buf, err = surf.ReadMsg(conn, buf)
+		if err != nil {
+			return
+		}
+		switch h.Type {
+		case surf.TypeInput:
+			in, err := surf.DecodeInput(buf)
+			if err != nil {
+				continue
+			}
+			ev := Event{Kind: in.Kind, Code: in.Code, Value: in.Value, X: in.X, Y: in.Y}
+			select {
+			case win.events <- ev:
+			default: // vol: oudste eruit, nieuwste erin — input is vers-waarde
+				select {
+				case <-win.events:
+				default:
+				}
+				select {
+				case win.events <- ev:
+				default:
+				}
+			}
+		case surf.TypeClose:
+			conn.Close()
+			return
+		}
+	}
+}
+
+// Close sluit de sessie netjes af.
+func (win *Window) Close() error {
+	win.mu.Lock()
+	conn := win.conn
+	win.dead = true
+	win.mu.Unlock()
+	if conn == nil {
+		return nil
+	}
+	surf.WriteMsg(conn, surf.TypeClose, 1, nil)
+	return conn.Close()
+}
