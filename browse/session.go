@@ -7,6 +7,10 @@ package browse
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
+	_ "embed"
+	"errors"
 	"image"
 	_ "image/gif" // decoders voor <img>: puur Go, dus ook op tamago
 	_ "image/jpeg"
@@ -15,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	gost "github.com/gost-dom/browser"
@@ -41,6 +46,7 @@ type Session struct {
 	b    *gost.Browser
 	win  html.Window
 	imgs map[string]image.Image // gedecodeerde <img>'s van de huidige pagina, op raw src
+	nerr *netErr                // laatste transportfout uit de netProxy (nil bij handler-tests)
 }
 
 // NewSession start een venster op de ingebouwde startpagina. Het netwerk
@@ -48,7 +54,51 @@ type Session struct {
 // site zou anders de hele event-lus voorgoed bevriezen ("hij staat vast",
 // Derek 19-07 — de browser hing op een niet-antwoordende host).
 func NewSession() *Session {
-	return newSession(gost.New(gost.WithHandler(netProxy{}), gost.WithScriptEngine(nopEngine{})))
+	nerr := &netErr{}
+	s := newSession(gost.New(gost.WithHandler(netProxy{nerr}), gost.WithScriptEngine(nopEngine{})))
+	s.nerr = nerr
+	return s
+}
+
+// netErr bewaart de laatste transportfout van de proxy. gost-dom vouwt elke
+// niet-200 plat tot "Non-ok Response" (Derek zag letterlijk dat en niets
+// meer) — hiermee komt de échte fout ("x509: …", "no such host", "HTTP
+// 404") in de statusbalk. De mutex omdat de proxy vanuit gost-dom's fetch
+// draait, het uitlezen vanuit Go/Follow.
+type netErr struct {
+	mu   sync.Mutex
+	last string
+}
+
+func (e *netErr) set(s string) {
+	e.mu.Lock()
+	e.last = s
+	e.mu.Unlock()
+}
+
+func (e *netErr) take() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	s := e.last
+	e.last = ""
+	return s
+}
+
+// explain vervangt een kale gost-dom-fout door wat er op de lijn echt
+// misging, als de proxy dat weet.
+func (s *Session) explain(err error) error {
+	if err == nil {
+		if s.nerr != nil {
+			s.nerr.take() // opruimen: fouten van subresources niet later tonen
+		}
+		return nil
+	}
+	if s.nerr != nil {
+		if msg := s.nerr.take(); msg != "" {
+			return errors.New(msg)
+		}
+	}
+	return err
 }
 
 // nopEngine compileert elk script tot een no-op. Niet omdat we JS willen
@@ -76,11 +126,39 @@ func (nopScript) Run() error                                         { return ni
 // netProxy is het "netwerk" voor gost-dom: een http.Handler die de request
 // écht uitvoert, met een harde timeout. Zo heeft de hele browser één plek
 // voor netbeleid (straks ook: alleen-origin voor gast-apps, §10-vergezicht).
-type netProxy struct{}
+type netProxy struct {
+	nerr *netErr
+}
 
-var netClient = &http.Client{Timeout: 20 * time.Second}
+// cacert.pem is Mozilla's root-CA-bundel (via https://curl.se/ca/cacert.pem,
+// MPL-2.0) — tamago heeft geen certificaatwinkel, dus zonder deze bundel
+// faalt élke HTTPS-handshake op het device met "x509: certificate signed by
+// unknown authority". Ververs hem af en toe met:
+//
+//	curl -fsSL https://curl.se/ca/cacert.pem -o browse/cacert.pem
+//
+//go:embed cacert.pem
+var cacertPEM []byte
 
-func (netProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+var netClient = &http.Client{Timeout: 20 * time.Second, Transport: netTransport()}
+
+// netTransport: de standaard-transport, met de systeempool waar die bestaat
+// (ontwikkelmachine) en anders de meegebakken bundel (bare metal). Let op:
+// certificaatverificatie heeft ook een kloppende klok nodig — staat het
+// device op epoch, dan is de fout "certificate has expired or is not yet
+// valid" en is NTP de echte fix, niet de bundel.
+func netTransport() http.RoundTripper {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	pool.AppendCertsFromPEM(cacertPEM)
+	t.TLSClientConfig = &tls.Config{RootCAs: pool}
+	return t
+}
+
+func (p netProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// De inkomende (server-vormige) request omzetten naar een uitgaande.
 	out, err := http.NewRequest(r.Method, r.URL.String(), r.Body)
 	if err != nil {
@@ -95,10 +173,14 @@ func (netProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := netClient.Do(out)
 	if err != nil {
+		p.nerr.set(err.Error())
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		p.nerr.set("HTTP " + resp.Status + " " + r.URL.String())
+	}
 	for k, vs := range resp.Header {
 		for _, v := range vs {
 			w.Header().Add(k, v)
@@ -134,7 +216,7 @@ func (s *Session) Go(addr string) error {
 	if err == nil {
 		s.loadImages()
 	}
-	return err
+	return s.explain(err)
 }
 
 // Follow navigeert naar een aangeklikte href, onaangeroerd: gost-dom lost
@@ -144,7 +226,7 @@ func (s *Session) Follow(href string) error {
 	if err == nil {
 		s.loadImages()
 	}
-	return err
+	return s.explain(err)
 }
 
 // Grenzen voor het afbeeldingen laden: dit draait straks op bare metal, en

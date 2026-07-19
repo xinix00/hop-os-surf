@@ -2,6 +2,7 @@ package browse
 
 import (
 	"bytes"
+	"crypto/x509"
 	"image"
 	"image/png"
 	"net/http"
@@ -245,6 +246,34 @@ func TestAfbeeldingen(t *testing.T) {
 	at := img.RGBAAt(logo.R.Min.X+5, BarH+logo.R.Min.Y+5)
 	if at.R != 0xFF || at.G != 0xFF || at.B != 0xFF {
 		t.Fatalf("logo-pixels niet gerenderd: %v", at)
+	}
+}
+
+func TestCACertBundel(t *testing.T) {
+	// De meegebakken bundel moet parsen — op tamago is dit de héle
+	// certificaatwinkel.
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(cacertPEM) {
+		t.Fatal("cacert.pem bevat geen parseerbare certificaten")
+	}
+	if n := strings.Count(string(cacertPEM), "BEGIN CERTIFICATE"); n < 50 {
+		t.Fatalf("verdacht weinig roots in de bundel: %d", n)
+	}
+}
+
+func TestEchteFoutInStatus(t *testing.T) {
+	// gost-dom vouwt elke niet-200 plat tot "Non-ok Response"; de proxy
+	// hoort de échte fout door te geven.
+	s := NewSession() // met netProxy — de fetch faalt op DNS, niet op een handler
+	err := s.Go("http://xn--dit-bestaat-echt-niet-4ob.invalid/")
+	if err == nil {
+		t.Skip("onverwacht: .invalid resolvet hier")
+	}
+	if strings.Contains(err.Error(), "Non-ok") {
+		t.Fatalf("kale gost-dom-fout niet vervangen: %v", err)
+	}
+	if !strings.Contains(err.Error(), "invalid") {
+		t.Fatalf("fout noemt de host niet: %v", err)
 	}
 }
 
