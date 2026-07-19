@@ -41,32 +41,6 @@ func main() {
 	sess := browse.NewSession()
 	view := browse.View{}
 
-	// navigate laadt een pagina en herlayout hem; bij een fout blijft de
-	// oude pagina staan met de fout bovenin.
-	navigate := func(load func() error) {
-		view.Status = "laden..."
-		img := win.Image()
-		view.Render(img)
-		win.Present()
-		if err := load(); err != nil {
-			view.Status = err.Error()
-			app.Logf("browser: %v", err)
-		} else {
-			view.Status = ""
-			view.Scroll = 0
-		}
-		view.Addr = sess.URL()
-		view.Page = sess.Layout(win.Image().Bounds().Dx())
-	}
-
-	if home := app.Env("SURF_HOME"); home != "" {
-		view.Addr = home
-		navigate(func() error { return sess.Go(home) })
-	} else {
-		view.Page = sess.Layout(win.Image().Bounds().Dx())
-		view.Addr = sess.URL()
-	}
-
 	redraw := func() {
 		img := win.Image() // elke frame opvragen: na een resize is hij nieuw
 		view.Render(img)
@@ -75,60 +49,105 @@ func main() {
 			app.Exit(1)
 		}
 	}
+
+	// Navigatie draait in een worker-goroutine: een trage of dooie site mag
+	// de event-lus nooit bevriezen ("na de eerste site gebeurt er niets en
+	// de input is stuk", Derek 19-07). De select hieronder blijft input
+	// verwerken; het resultaat komt terug via navDone. sess wordt alleen
+	// door de worker aangeraakt zolang navBusy staat — daarna weer door de
+	// lus (URL/Layout). Eén navigatie tegelijk; kliks tijdens het laden
+	// worden genegeerd.
+	navDone := make(chan error, 1)
+	navBusy := false
+	startNav := func(what string, load func() error) {
+		if navBusy {
+			return
+		}
+		navBusy = true
+		app.Logf("browser: %s", what)
+		view.Status = "loading..."
+		redraw()
+		go func() { navDone <- load() }()
+	}
+
+	view.Page = sess.Layout(win.Image().Bounds().Dx())
+	view.Addr = sess.URL()
+	if home := app.Env("SURF_HOME"); home != "" {
+		view.Addr = home
+		startNav("go "+home, func() error { return sess.Go(home) })
+	}
 	redraw()
 
 	var shift bool
-	for ev := range win.Events() {
-		switch {
-		case ev.Kind == window.KindResize:
-			// nieuwe breedte → nieuwe layout; scroll blijft zo goed als
-			// mogelijk staan (ScrollBy(0) klemt hem op de nieuwe hoogte)
-			view.Page = sess.Layout(int(ev.X))
-			view.ScrollBy(0, int(ev.Y))
+	for {
+		select {
+		case err := <-navDone:
+			navBusy = false
+			if err != nil {
+				view.Status = err.Error()
+				app.Logf("browser: %v", err)
+			} else {
+				view.Status = ""
+				view.Scroll = 0
+			}
+			view.Addr = sess.URL()
+			view.Page = sess.Layout(win.Image().Bounds().Dx())
 			redraw()
 
-		case ev.Kind == surf.InputWheel:
-			_, h := win.Size()
-			if view.ScrollBy(int(ev.Value)*24, h) {
-				redraw()
+		case ev, ok := <-win.Events():
+			if !ok {
+				app.Exit(1)
 			}
-
-		case ev.Kind == surf.InputButton && ev.Value == 1:
-			href := view.Hit(int(ev.X), int(ev.Y))
-			if href == "" {
-				continue
-			}
-			app.Logf("browser: follow %s", href)
-			navigate(func() error { return sess.Follow(href) })
-			redraw()
-
-		case ev.Kind == surf.InputKey:
-			if ev.Code == 16 { // shift bijhouden voor Rune
-				shift = ev.Value == 1
-				continue
-			}
-			if ev.Value != 1 {
-				continue
-			}
-			switch ev.Code {
-			case 13: // Enter: laad wat er in de balk staat
-				app.Logf("browser: go %s", view.Addr)
-				navigate(func() error { return sess.Go(view.Addr) })
-				redraw()
-			case 8: // Backspace
-				if view.Addr != "" {
-					view.Addr = view.Addr[:len(view.Addr)-1]
-					redrawBar(win, &view, app.Logf)
+			switch {
+			case ev.Kind == window.KindResize:
+				// nieuwe breedte → nieuwe layout; scroll blijft zo goed als
+				// mogelijk staan (ScrollBy(0) klemt hem op de nieuwe hoogte).
+				// Tijdens een navigatie niet layouten (sess is van de worker).
+				if !navBusy {
+					view.Page = sess.Layout(int(ev.X))
 				}
-			default:
-				if r := browse.Rune(ev.Code, shift); r != 0 {
-					view.Addr += string(r)
-					redrawBar(win, &view, app.Logf)
+				view.ScrollBy(0, int(ev.Y))
+				redraw()
+
+			case ev.Kind == surf.InputWheel:
+				_, h := win.Size()
+				if view.ScrollBy(int(ev.Value)*24, h) {
+					redraw()
+				}
+
+			case ev.Kind == surf.InputButton && ev.Value == 1:
+				href := view.Hit(int(ev.X), int(ev.Y))
+				if href == "" {
+					continue
+				}
+				startNav("follow "+href, func() error { return sess.Follow(href) })
+
+			case ev.Kind == surf.InputKey:
+				if ev.Code == 16 { // shift bijhouden voor Rune
+					shift = ev.Value == 1
+					continue
+				}
+				if ev.Value != 1 {
+					continue
+				}
+				switch ev.Code {
+				case 13: // Enter: laad wat er in de balk staat
+					addr := view.Addr
+					startNav("go "+addr, func() error { return sess.Go(addr) })
+				case 8: // Backspace
+					if view.Addr != "" {
+						view.Addr = view.Addr[:len(view.Addr)-1]
+						redrawBar(win, &view, app.Logf)
+					}
+				default:
+					if r := browse.Rune(ev.Code, shift); r != 0 {
+						view.Addr += string(r)
+						redrawBar(win, &view, app.Logf)
+					}
 				}
 			}
 		}
 	}
-	app.Exit(1)
 }
 
 // redrawBar hertekent alléén de adresbalk: tikken kost zo een strook van
