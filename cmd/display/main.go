@@ -12,9 +12,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/xinix00/hop-os-surf/compositor"
-	"github.com/xinix00/hop-os-surf/surf"
-	"github.com/xinix00/hop-os-surf/surfserve"
+	"github.com/xinix00/hop-os-surf/stack/compositor"
+	"github.com/xinix00/hop-os-surf/stack/surf"
+	"github.com/xinix00/hop-os-surf/stack/surfserve"
 	"hop-os/metal/app/applib"
 	"hop-os/metal/app/applib/appnet"
 )
@@ -59,6 +59,9 @@ func main() {
 
 	if fb := fbFromEnv(app); fb != nil {
 		go fb.blitLoop(comp)
+		// De glas-cursor: elke muispositie uit de input-stroom landt als
+		// overlay direct op de framebuffer — nooit in de compositie (§5).
+		srv.OnPointer(fb.CursorTo)
 		app.Logf("display: fb grant %dx%d stride %d at %#x", fb.w, fb.h, fb.stride, fb.base)
 	}
 

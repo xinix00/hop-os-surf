@@ -10,9 +10,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/xinix00/hop-os-surf/face"
-	"github.com/xinix00/hop-os-surf/surf"
-	"github.com/xinix00/hop-os-surf/window"
+	"github.com/xinix00/hop-os-surf/app/clock"
+	"github.com/xinix00/hop-os-surf/stack/surf"
+	"github.com/xinix00/hop-os-surf/stack/window"
 	"hop-os/metal/app/applib"
 	"hop-os/metal/app/applib/appnet"
 )
@@ -64,7 +64,7 @@ func main() {
 			full := last < 0 || res // eerste frame of net geresized: alles
 			last = s
 			img := win.Image()
-			face.Draw(img, now)
+			clock.Draw(img, now)
 			var err error
 			if full {
 				err = win.Present()
@@ -72,7 +72,7 @@ func main() {
 				// Alleen het wijzer-gebied de lijn over (ring en streepjes
 				// veranderen nooit) — en met de stream-compressie erachter
 				// is dat bijna niets.
-				err = win.Present(face.HandsBox(img.Bounds()))
+				err = win.Present(clock.HandsBox(img.Bounds()))
 			}
 			if err != nil {
 				app.Logf("clock: present: %v", err)

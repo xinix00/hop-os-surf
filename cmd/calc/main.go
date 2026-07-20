@@ -1,20 +1,20 @@
-// Calc is de tweede GUI-demo-app — en de eerste échte interactieve: een
-// rekenmachine die ergens in het cluster draait terwijl jij hem bedient
-// vanuit de browser-KVM van de display-node (of straks een USB-toetsenbord).
-// Muisklikken komen binnen als window-lokale InputButton-events, toetsen als
-// browser-keycodes; calc.Hit/calc.Key vertalen beide naar dezelfde Press.
+// Calc is de tweede GUI-app — en sinds 20-07 een scene-app (P2): de boom
+// met knoppen reist één keer, de display rendert en hit-test, en de app
+// krijgt "knop 7 geklikt" plus rauwe toetsen terug. Elke toetsaanslag is
+// daarmee één PATCH van het display-Value — bytes in plaats van de oude
+// pixel-damage. Muisklikken bewijzen de EVENT-terugweg, het toetsenbord de
+// key-doorvoer (web-KVM en straks USB-HID).
 package main
 
 import (
 	"fmt"
-	"image"
+	"sync"
 
 	"hop-os/metal/app/applib"
 	"hop-os/metal/app/applib/appnet"
 
-	"github.com/xinix00/hop-os-surf/calc"
-	"github.com/xinix00/hop-os-surf/surf"
-	"github.com/xinix00/hop-os-surf/window"
+	"github.com/xinix00/hop-os-surf/app/calc"
+	"github.com/xinix00/hop-os-surf/stack/scene"
 )
 
 func main() {
@@ -30,71 +30,37 @@ func main() {
 		app.Exit(1)
 	}
 
-	name := fmt.Sprintf("calc @ slot %d", app.Slot)
-	win, err := window.Open(addr, name, 240, 320, app.Logf)
-	if err != nil {
-		app.Logf("calc: open %s: %v", addr, err)
+	conn := scene.Open(addr, fmt.Sprintf("calc @ slot %d", app.Slot), 240, 320, app.Logf)
+
+	// press komt uit twee paden van de leeslus (EVENT en toetsen); de mutex
+	// maakt de app onafhankelijk van dat detail.
+	var mu sync.Mutex
+	var c calc.Calc
+	var display *scene.Node
+	press := func(key byte) {
+		mu.Lock()
+		c.Press(key)
+		line := calc.Line(&c)
+		conn.SetText(display, line)
+		mu.Unlock()
+		app.Logf("calc: key %q -> %s", key, line)
+	}
+
+	root, disp := calc.Tree(press)
+	display = disp
+	conn.OnKey = func(code uint32, down bool) {
+		if !down {
+			return
+		}
+		if k := calc.Key(code); k != 0 {
+			press(k)
+		}
+	}
+	if err := conn.Show(root); err != nil {
+		app.Logf("calc: show %s: %v", addr, err)
 		app.Exit(1)
 	}
-	app.Logf("calc: window open on %s", addr)
+	app.Logf("calc: scene of %d bytes sent to %s", conn.BytesSent(), addr)
 
-	var c calc.Calc
-	var hover byte
-	redraw := func() {
-		img := win.Image() // elke frame opvragen: na een resize is hij nieuw
-		calc.Render(img, &c, hover)
-		if err := win.Present(); err != nil {
-			app.Logf("calc: present: %v", err)
-			app.Exit(1)
-		}
-	}
-	redraw()
-
-	// De hele app is event-gedreven: geen ticker, geen polling — precies
-	// het "idle mag geen CPU kosten"-principe. Hover herrendert alleen bij
-	// het wisselen van knop (de damage-stream laat het live zien).
-	for ev := range win.Events() {
-		var key byte
-		switch {
-		case ev.Kind == window.KindResize:
-			// herteken op de nieuwe maat (key blijft 0)
-		case ev.Kind == surf.InputMove:
-			h := calc.Hit(win.Image().Bounds(), int(ev.X), int(ev.Y))
-			if h == hover {
-				continue
-			}
-			old := hover
-			hover = h
-			// Alleen de twee geraakte knoppen hertekenen en presenteren:
-			// een hover-wissel is ~130KB i.p.v. een window van 1,7MB.
-			img := win.Image()
-			r1 := calc.RenderKey(img, &c, old, hover)
-			r2 := calc.RenderKey(img, &c, hover, hover)
-			var rects []image.Rectangle
-			for _, r := range []image.Rectangle{r1, r2} {
-				if !r.Empty() {
-					rects = append(rects, r)
-				}
-			}
-			if len(rects) > 0 {
-				if err := win.Present(rects...); err != nil {
-					app.Logf("calc: present: %v", err)
-					app.Exit(1)
-				}
-			}
-			continue
-		case ev.Kind == surf.InputButton && ev.Value == 1:
-			key = calc.Hit(win.Image().Bounds(), int(ev.X), int(ev.Y))
-		case ev.Kind == surf.InputKey && ev.Value == 1:
-			key = calc.Key(ev.Code)
-		default:
-			continue
-		}
-		if key != 0 {
-			c.Press(key)
-			app.Logf("calc: key %q -> %s", key, c.Display())
-		}
-		redraw()
-	}
-	app.Exit(1)
+	select {} // volledig event-gedreven: de leeslus drijft de app
 }

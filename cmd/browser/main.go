@@ -13,9 +13,9 @@ import (
 	"hop-os/metal/app/applib"
 	"hop-os/metal/app/applib/appnet"
 
-	"github.com/xinix00/hop-os-surf/browse"
-	"github.com/xinix00/hop-os-surf/surf"
-	"github.com/xinix00/hop-os-surf/window"
+	"github.com/xinix00/hop-os-surf/app/browse"
+	"github.com/xinix00/hop-os-surf/stack/surf"
+	"github.com/xinix00/hop-os-surf/stack/window"
 )
 
 func main() {
