@@ -59,12 +59,18 @@ SCREENSHOT_OUT=$PWD/docs/launcher.png go test ./app/launcher -run Screenshot
 ![taskman](docs/taskman.png)
 ![launcher](docs/launcher.png)
 
-## Sizing is the WM's call
+## Windows, not tiles
 
-CREATE carries a size *hint*; CONFIGURE is authoritative (the Wayland
-lesson). Apps re-render at whatever size the tiling layout hands them —
-windows always fill their cell exactly. Damage at a stale size is silently
-dropped; a presenting app converges on its own.
+Floating windows: an app gets the size it asks for in CREATE and *keeps* it
+— no tiling that shrinks everything whenever a window arrives. New windows
+cascade; the title bar drags; click raises; the taskbar at the bottom has a
+start button (it toggles the app that declared `CREATE.Role = menu` — the
+launcher) and one button per window (click = raise, again = minimize).
+
+CONFIGURE is still authoritative (the Wayland lesson): the WM grants the
+hint, clamped to the work area — an oversized hint gets a smaller CONFIGURE
+and the app re-renders. Damage at a stale size is silently dropped; a
+presenting app converges on its own.
 
 ## Status
 

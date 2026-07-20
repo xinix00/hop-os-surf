@@ -18,6 +18,7 @@ import (
 	"github.com/xinix00/hop-os-surf/app/hopapi"
 	"github.com/xinix00/hop-os-surf/app/launcher"
 	"github.com/xinix00/hop-os-surf/stack/scene"
+	"github.com/xinix00/hop-os-surf/stack/surf"
 )
 
 // action is één start of stop voor de worker (stop = Spec nil).
@@ -56,7 +57,10 @@ func main() {
 	}
 	app.Logf("launcher: %d app(s) in de catalogus", len(apps))
 
-	conn := scene.Open(addr, fmt.Sprintf("launcher @ slot %d", app.Slot), 480, 360, app.Logf)
+	// Het startmenu: RoleMenu hangt dit window achter de startknop van de
+	// taskbar — verborgen tot een klik, geen eigen taskbar-knop.
+	conn := scene.Open(addr, fmt.Sprintf("launcher @ slot %d", app.Slot), 320, 420, app.Logf)
+	conn.Role = surf.RoleMenu
 	m := launcher.NewMenu(conn, apps)
 
 	// Hooks vullen kanalen (nooit blokkeren onder de menu-lock); de worker

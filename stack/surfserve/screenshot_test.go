@@ -42,19 +42,44 @@ func TestScreenshotDemo(t *testing.T) {
 	web := httptest.NewServer(srv.Handler())
 	defer web.Close()
 
-	// Vier windows van vier "nodes": de klok als pixel-app (P1), en taskman,
-	// launcher en calc als échte scene-apps (P2) — dezelfde keten als op het
-	// device: SCENE de lijn over, display-side gerenderd.
+	// Vier apps van vier "nodes": de klok als pixel-app (P1), taskman en calc
+	// als scene-apps (P2), en de launcher als startmenu (RoleMenu) achter de
+	// startknop. Sequentieel geopend zodat de cascade-posities vaststaan;
+	// daarna slepen we ze via échte KVM-input naar hun plek — de demo bewijst
+	// zo ook de titelbalk-sleep en de taskbar.
+	colBtn := color.RGBA{0x23, 0x2D, 0x46, 0xFF} // scene-knoppen
+	drag := func(fromX, fromY, toX, toY int) {
+		srv.Input(surf.Input{Kind: surf.InputButton, Value: 1, X: uint16(fromX), Y: uint16(fromY)})
+		srv.Input(surf.Input{Kind: surf.InputMove, X: uint16(toX), Y: uint16(toY)})
+		srv.Input(surf.Input{Kind: surf.InputButton, Value: 0, X: uint16(toX), Y: uint16(toY)})
+	}
+
+	// 1. De klok: cascade-slot 1 op (16,16) — blijft daar.
 	clk, err := window.Open(l.Addr().String(), "clock @ node-a", 320, 320, t.Logf)
 	if err != nil {
 		t.Fatal(err)
 	}
+	demoNow := time.Date(2026, 7, 19, 10, 8, 42, 0, time.UTC)
+	eventually(t, "clock visible", func() bool {
+		clock.Draw(clk.Image(), demoNow)
+		if err := clk.Present(); err != nil {
+			t.Fatal(err)
+		}
+		_, ok := findColor(t, web.URL, color.RGBA{0xFF, 0x6E, 0x50, 0xFF}) // secondewijzer
+		return ok
+	})
+
+	// 2. Taskman: cascade-slot 2 op (44,44) → naar rechtsboven slepen.
 	tconn := scene.Open(l.Addr().String(), "taskman @ node-b", 480, 360, t.Logf)
 	defer tconn.Close()
 	demoTaskman(t, tconn)
-	lconn := scene.Open(l.Addr().String(), "launcher @ node-a", 480, 360, t.Logf)
-	defer lconn.Close()
-	demoLauncher(t, lconn)
+	eventually(t, "taskman composed", func() bool {
+		return countColor(t, web.URL, colBtn) > 0
+	})
+	drag(44+12, 44+8, 720+12, 40+8) // titelbalk-greep → win.Min (720,40)
+
+	// 3. Calc: cascade-slot 3 op (72,72) → naar rechtsonder slepen.
+	afterTaskman := countColor(t, web.URL, colBtn)
 	cconn := scene.Open(l.Addr().String(), "calc @ node-c", 240, 320, t.Logf)
 	defer cconn.Close()
 	var cc calc.Calc
@@ -66,26 +91,27 @@ func TestScreenshotDemo(t *testing.T) {
 	if err := cconn.Show(croot); err != nil {
 		t.Fatal(err)
 	}
-
-	// Cursor erbij (de KVM-aanwijzer); hertekenen per poging zodat late
-	// CONFIGUREs (WM-maten) altijd verwerkt worden — apps vullen hun cel.
-	srv.Input(surf.Input{Kind: surf.InputMove, X: 700, Y: 400})
-	demoNow := time.Date(2026, 7, 19, 10, 8, 42, 0, time.UTC)
-	eventually(t, "all windows composed at final sizes", func() bool {
-		// De klok is de enige pixel-app: die moet zijn definitieve WM-maat
-		// hebben en hertekenen (scene-surfaces re-flowt de display zelf).
-		if ww, _ := clk.Size(); ww < 500 {
-			return false
-		}
-		clock.Draw(clk.Image(), demoNow)
-		if err := clk.Present(); err != nil {
-			t.Fatal(err)
-		}
-		_, ok1 := findColor(t, web.URL, color.RGBA{0xFF, 0x6E, 0x50, 0xFF}) // secondewijzer
-		_, ok2 := findColor(t, web.URL, color.RGBA{0x23, 0x2D, 0x46, 0xFF}) // scene-knoppen
-		_, ok3 := findColor(t, web.URL, color.RGBA{0x3A, 0x46, 0x63, 0xFF}) // scene-list-rand
-		return ok1 && ok2 && ok3
+	eventually(t, "calc composed", func() bool {
+		return countColor(t, web.URL, colBtn) > afterTaskman
 	})
+	drag(72+12, 72+8, 960+12, 336+8) // → win.Min (960,336), boven de taskbar
+
+	// 4. De launcher als startmenu: onzichtbaar tot de startknop — dus
+	// klikken tot hij open is (de registratie is asynchroon).
+	afterCalc := countColor(t, web.URL, colBtn)
+	lconn := scene.Open(l.Addr().String(), "launcher @ node-a", 320, 420, t.Logf)
+	lconn.Role = surf.RoleMenu
+	defer lconn.Close()
+	demoLauncher(t, lconn)
+	eventually(t, "start menu open", func() bool {
+		if countColor(t, web.URL, colBtn) > afterCalc {
+			return true
+		}
+		srv.Input(surf.Input{Kind: surf.InputButton, Value: 1, X: 10, Y: 700})
+		srv.Input(surf.Input{Kind: surf.InputButton, Value: 0, X: 10, Y: 700})
+		return false
+	})
+	srv.Input(surf.Input{Kind: surf.InputMove, X: 640, Y: 500}) // de KVM-aanwijzer
 	resp, err := http.Get(web.URL + "/screen.png")
 	if err != nil {
 		t.Fatal(err)

@@ -179,25 +179,43 @@ func DecodeHello(p []byte) (Hello, error) {
 type Create struct {
 	W, H   uint16
 	Format uint8
+	Role   uint8 // RoleWindow (default) of RoleMenu — wat de WM met dit
+	// surface doet, verklaard door de app zelf (20-07): één byte dode data,
+	// zodat de chrome nooit op windowtitels hoeft te raden.
 }
 
+// Surface-rollen (CREATE.Role).
+const (
+	RoleWindow = 0 // gewoon window: taskbar-knop, cascade-plaatsing
+	RoleMenu   = 1 // startmenu (de launcher): verborgen tot de startknop,
+	// boven de taskbar, geen eigen taskbar-knop, klik ernaast sluit
+)
+
 func (m Create) Encode() []byte {
-	b := make([]byte, 5)
+	b := make([]byte, 6)
 	binary.LittleEndian.PutUint16(b, m.W)
 	binary.LittleEndian.PutUint16(b[2:], m.H)
 	b[4] = m.Format
+	b[5] = m.Role
 	return b
 }
 
+// DecodeCreate accepteert ook de 5-byte vorm van vóór Role (20-07): een
+// oudere app is gewoon een window — en een oudere display leest van een
+// nieuwere app alleen de eerste 5 bytes. Beide kanten degraderen netjes.
 func DecodeCreate(p []byte) (Create, error) {
 	if len(p) < 5 {
 		return Create{}, ErrShort
 	}
-	return Create{
+	c := Create{
 		W:      binary.LittleEndian.Uint16(p),
 		H:      binary.LittleEndian.Uint16(p[2:]),
 		Format: p[4],
-	}, nil
+	}
+	if len(p) >= 6 {
+		c.Role = p[5]
+	}
+	return c, nil
 }
 
 // Damage: frame u32 | x u16 | y u16 | w u16 | h u16, gevolgd door w·h·4

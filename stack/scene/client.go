@@ -81,10 +81,16 @@ type Conn struct {
 	// leesgoroutine, zonder locks: de app mag terug de Conn in.
 	OnKey func(code uint32, down bool)
 
-	mu   sync.Mutex // conn + root + byID
-	conn net.Conn
-	root *Node
-	byID map[uint16]*Node
+	// Role (optioneel, zetten vóór Show) verklaart aan de WM wat dit surface
+	// is: surf.RoleWindow (default) of surf.RoleMenu — het startmenu, dat de
+	// display achter de startknop hangt.
+	Role uint8
+
+	mu      sync.Mutex // conn + root + byID
+	conn    net.Conn
+	root    *Node
+	byID    map[uint16]*Node
+	started bool // lees- en pinglus draaien al (Show mag vaker: schermwissel)
 
 	sent atomic.Uint64 // PATCH/SCENE-bytes op de draad — het §8-meetpunt
 }
@@ -97,8 +103,12 @@ func Open(addr, name string, hintW, hintH int, logf func(string, ...any)) *Conn 
 	return &Conn{addr: addr, name: name, hintW: hintW, hintH: hintH, logf: logf}
 }
 
-// Show maakt dit de getoonde boom: ids toekennen, verbinden en versturen.
-// De leeslus (EVENT-dispatch + zelfheling) start hier.
+// Show maakt dit de getoonde boom: ids toekennen en versturen. Mag zo vaak
+// als de app wil (taskman wisselt per scherm van boom — de bug van 20-07:
+// élke Show startte een verse lees- en pinglus, en dat leger ging bij de
+// eerste hapering allemaal zélf herverbinden → een window per lus): de
+// eerste Show verbindt en start de lussen, elke volgende stuurt alleen de
+// nieuwe boom over de bestaande verbinding.
 func (c *Conn) Show(root *Node) error {
 	c.mu.Lock()
 	c.root = root
@@ -113,6 +123,25 @@ func (c *Conn) Show(root *Node) error {
 	}
 	walk(root)
 	c.byID = Index(root)
+
+	if c.started {
+		// Boomwissel: alleen SCENE sturen; een schrijffout sluit de
+		// verbinding en de leeslus heelt met de actuele boom.
+		conn := c.conn
+		var err error
+		if conn != nil {
+			payload := Encode(root)
+			if err = surf.WriteMsg(conn, surf.TypeScene, 1, payload); err == nil {
+				c.sent.Add(uint64(surf.HeaderSize + len(payload)))
+			}
+		}
+		c.mu.Unlock()
+		if err != nil && conn != nil {
+			conn.Close()
+		}
+		return nil
+	}
+	c.started = true
 	c.mu.Unlock()
 
 	// Ook de éérste verbinding is zelfherstellend (zelfde boot-race als
@@ -159,7 +188,7 @@ func (c *Conn) connect() error {
 		return err
 	}
 	if err := surf.WriteMsg(conn, surf.TypeCreate, 1,
-		surf.Create{W: uint16(c.hintW), H: uint16(c.hintH), Format: surf.FormatXRGB8888}.Encode()); err != nil {
+		surf.Create{W: uint16(c.hintW), H: uint16(c.hintH), Format: surf.FormatXRGB8888, Role: c.Role}.Encode()); err != nil {
 		conn.Close()
 		return err
 	}

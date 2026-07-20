@@ -31,8 +31,9 @@ func fetchScreen(t *testing.T, base string) image.Image {
 }
 
 // TestResizeFlow bewijst de WM-gestuurde maatvoering end-to-end: CREATE is
-// een hint, CONFIGURE is de wet, en een app die op de nieuwe maat hertekent
-// vult zijn cel exact — geen dooie randen.
+// een hint, CONFIGURE is de wet — de zwevende WM (20-07) honoreert de hint
+// en klemt alleen wat niet op het werkvlak past. De app die op de
+// toegekende maat hertekent vult zijn window exact.
 func TestResizeFlow(t *testing.T) {
 	comp := compositor.New(320, 200)
 	srv := New(comp, t.Logf)
@@ -53,39 +54,44 @@ func TestResizeFlow(t *testing.T) {
 		}
 	}
 
-	// Window 1 met een kleine hint: de WM maakt hem (bijna) schermvullend.
-	win1, err := window.Open(l.Addr().String(), "big @ node-a", 60, 40, t.Logf)
+	// Window 1: de hint wordt gehonoreerd — en blijft staan.
+	win1, err := window.Open(l.Addr().String(), "one @ node-a", 100, 80, t.Logf)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer win1.Close()
 	waitResize(t, win1)
-	if w, _ := win1.Size(); w < 250 {
-		t.Fatalf("single window got width %d, want near-fullscreen", w)
+	if w, h := win1.Size(); w != 100 || h != 80 {
+		t.Fatalf("hint hoort gehonoreerd: %dx%d, want 100x80", w, h)
 	}
 	fill(win1)
 	// De present wordt asynchroon door de sessie verwerkt: pollen.
-	var full int
-	eventually(t, "full-cell fill visible", func() bool {
-		full = countColor(t, web.URL, red)
-		return full >= 250*120
+	eventually(t, "hint-sized fill visible", func() bool {
+		return countColor(t, web.URL, red) == 100*80
 	})
 
-	// Window 2 erbij: win1 krijgt een nieuwe (kleinere) maat en hertekent.
-	win2, err := window.Open(l.Addr().String(), "half @ node-b", 60, 40, t.Logf)
+	// Window 2 erbij: win1 verandert NIET van maat (het hele punt).
+	win2, err := window.Open(l.Addr().String(), "two @ node-b", 60, 40, t.Logf)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer win2.Close()
-	waitResize(t, win1)
-	if w, _ := win1.Size(); w > 320/2 {
-		t.Fatalf("win1 width %d after second window, want ~half", w)
+	waitResize(t, win2)
+	if w, h := win1.Size(); w != 100 || h != 80 {
+		t.Fatalf("win1 hoort onaangeroerd na een tweede window: %dx%d", w, h)
 	}
-	fill(win1)
-	eventually(t, "win1 fills exactly its shrunken cell", func() bool {
-		n := countColor(t, web.URL, red)
-		return n > 100*100 && n < full*6/10
-	})
+
+	// Een reuze-hint wordt geklemd op het werkvlak: dáár is CONFIGURE de wet.
+	win3, err := window.Open(l.Addr().String(), "big @ node-c", 999, 999, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer win3.Close()
+	waitResize(t, win3)
+	if w, h := win3.Size(); w >= 320 || h >= 200 {
+		t.Fatalf("reuze-hint hoort geklemd: %dx%d", w, h)
+	}
+	fill(win3) // hertekenen op de geklemde maat: geen stale damage meer
 }
 
 // waitResize wacht op het eerstvolgende KindResize-event.

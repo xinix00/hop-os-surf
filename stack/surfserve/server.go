@@ -346,7 +346,7 @@ func (s *Server) handle(conn net.Conn) {
 				// CREATE-maat is een hint — Relayout kent de echte maat toe
 				// en de OnResize-callback stuurt de CONFIGURE; registratie
 				// moet dus vóór de Relayout.
-				sur = s.comp.Add(sess.app, int(c.W), int(c.H))
+				sur = s.comp.Add(sess.app, int(c.W), int(c.H), c.Role == surf.RoleMenu)
 			}
 			if old := sess.put(h.Surface, sur); old != nil {
 				// Her-CREATE van hetzelfde id: oude weg, wees voorspelbaar.
@@ -464,13 +464,18 @@ func (s *Server) Input(ev surf.Input) {
 	case surf.InputMove:
 		// Geen SetCursor: de cursor wordt niet gecomponeerd (browser heeft
 		// z'n eigen; op de Pi straks een HVS-plane) — een move kost het
-		// scherm dus niets, alleen de app onder de aanwijzer hoort hem.
-		sur, lx, ly, ok = s.comp.SurfaceAt(int(ev.X), int(ev.Y))
+		// scherm dus niets. Een lopende titelbalk-sleep consumeert de move
+		// (PointerMove verplaatst dan het window); anders is het hover voor
+		// de app onder de aanwijzer.
+		sur, lx, ly, ok = s.comp.PointerMove(int(ev.X), int(ev.Y))
 	case surf.InputButton:
+		// Down: eerst de chrome (taskbar, titelbalk-sleep, raise) — alleen
+		// een klik op content bereikt de app. Up: einde sleep of gewoon
+		// door naar de app.
 		if ev.Value != 0 {
-			sur, lx, ly, ok = s.comp.ClickAt(int(ev.X), int(ev.Y))
+			sur, lx, ly, ok = s.comp.PointerDown(int(ev.X), int(ev.Y))
 		} else {
-			sur, lx, ly, ok = s.comp.SurfaceAt(int(ev.X), int(ev.Y))
+			sur, lx, ly, ok = s.comp.PointerUp(int(ev.X), int(ev.Y))
 		}
 	default: // toetsen, wiel → focus
 		sur = s.comp.Focused()

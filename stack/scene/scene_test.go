@@ -2,7 +2,11 @@ package scene
 
 import (
 	"image"
+	"net"
 	"testing"
+	"time"
+
+	"github.com/xinix00/hop-os-surf/stack/surf"
 )
 
 // boom bouwt het test-dashboard: heading, twee values, meter, knoppenrij.
@@ -216,4 +220,71 @@ func TestPatchAddBlijftUitScene(t *testing.T) {
 	if len(back.Items) != 2 || back.Items[1] != "b" {
 		t.Fatalf("roundtrip na addItems → %v", back.Items)
 	}
+}
+
+// TestShowHergebruiktVerbinding: Show mag per schermwissel — één verbinding,
+// elke volgende Show is alleen een nieuw SCENE-bericht (de storm van 20-07:
+// elke Show startte een eigen lees/ping-lus die zelf ging herverbinden, en
+// elke klik in taskman opende zo een nieuw window).
+func TestShowHergebruiktVerbinding(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	accepts := make(chan net.Conn, 4)
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			accepts <- c
+		}
+	}()
+
+	c := Open(l.Addr().String(), "test", 100, 100, t.Logf)
+	if err := c.Show(Col(2, Label(0, "een"))); err != nil {
+		t.Fatal(err)
+	}
+	conn := <-accepts
+
+	types := make(chan uint8, 8)
+	go func() {
+		var buf []byte
+		for {
+			h, p, err := surf.ReadMsg(conn, buf)
+			if err != nil {
+				return
+			}
+			buf = p
+			types <- h.Type
+		}
+	}()
+	want := func(what string, typ uint8) {
+		select {
+		case got := <-types:
+			if got != typ {
+				t.Fatalf("%s: bericht %d, want %d", what, got, typ)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s: geen bericht", what)
+		}
+	}
+	want("hello", surf.TypeHello)
+	want("create", surf.TypeCreate)
+	want("scene", surf.TypeScene)
+
+	if err := c.Show(Col(2, Label(0, "twee"))); err != nil {
+		t.Fatal(err)
+	}
+	want("herShow = alleen SCENE", surf.TypeScene)
+
+	select {
+	case <-accepts:
+		t.Fatal("een tweede Show hoort géén tweede verbinding te openen")
+	case <-time.After(300 * time.Millisecond):
+	}
+	c.Close()
 }

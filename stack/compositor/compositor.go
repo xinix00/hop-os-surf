@@ -1,15 +1,18 @@
 // Package compositor is de software-fallback-compositor van de display-app
-// (HopOS docs/gui-ontwerp.md §2/§5): surfaces in een tiling-grid met
-// titelbalken, gecomponeerd naar een RGBA-beeld. De HVS/DPU-hardware-targets
-// van P4 nemen later dezelfde surfaces over als planes; dit pakket blijft de
+// (HopOS docs/gui-ontwerp.md §2/§5): zwevende windows met titelbalken en een
+// taskbar, gecomponeerd naar een RGBA-beeld. De HVS/DPU-hardware-targets van
+// P4 nemen later dezelfde surfaces over als planes; dit pakket blijft de
 // fallback voor boards zonder scanout-compositor (en voor de headless
 // screenshot-test).
 //
-// Maatvoering is WM-gestuurd (de Wayland-les): de app *vraagt* een maat
-// (hint in CREATE), maar Relayout bepaalt wat elk window krijgt en meldt
-// wijzigingen via OnResize — de server stuurt daar CONFIGURE op uit. Damage
-// op een verouderde maat wordt stil gedropt: die app is gewoon nog onderweg
-// naar de nieuwe maat.
+// WM-model (20-07, "met windows :P" — Derek): een app krijgt de maat die hij
+// in CREATE vraagt en hóudt die — geen tiling dat alles kleiner maakt bij elk
+// nieuw window. Nieuwe windows cascaderen; de titelbalk sleept; klikken
+// raist; de taskbar onderin heeft een startknop (de launcher naar voren) en
+// een knop per window (klik = naar voren, nog eens = minimaliseren).
+// CONFIGURE blijft de wet (de Wayland-les): de WM kent de maat toe — hij is
+// alleen zo beleefd om de hint te honoreren zolang hij op het werkvlak past.
+// Damage op een verouderde maat wordt stil gedropt.
 //
 // Pixelmodel: surfaces bufferen intern in RGBA-bytevolgorde (zoals
 // image.RGBA); de draad levert XRGB8888 little-endian (B,G,R,X). De enige
@@ -36,14 +39,16 @@ var (
 	colBorderFocus = color.RGBA{0x6E, 0xA8, 0xFF, 0xFF}
 	colBorderIdle  = color.RGBA{0x3A, 0x4A, 0x6A, 0xFF}
 	colText        = color.RGBA{0xF0, 0xF4, 0xFF, 0xFF}
+	colTextDim     = color.RGBA{0x8A, 0x94, 0xAA, 0xFF}
+	colBar         = color.RGBA{0x0A, 0x10, 0x1C, 0xFF} // taskbar
 )
 
-const margin = 8 // pixels tussen/rond windows
+const margin = 8 // cascade-start en ademruimte langs de randen
 
 // Surface is één window-inhoud: dubbel gebufferd (DAMAGE schrijft back,
 // PRESENT flipt naar front — de compositor leest alleen front, dus een traag
-// frame kan nooit half zichtbaar worden). De maat is van de WM: alleen
-// resize (via Relayout) verandert hem.
+// frame kan nooit half zichtbaar worden). De maat is van de WM: die honoreert
+// de CREATE-hint (geklemd op het werkvlak) en verandert hem daarna niet meer.
 type Surface struct {
 	Name string
 
@@ -53,10 +58,12 @@ type Surface struct {
 	front     []byte
 	presented bool // er is ooit een PRESENT geweest (anders: leeg vlak tonen)
 
-	// win/screen zijn de window- en content-rechthoek van de laatste
-	// Relayout; alleen onder Compositor.mu gelezen/geschreven.
-	win    image.Rectangle
-	screen image.Rectangle
+	// WM-staat; alleen onder Compositor.mu gelezen/geschreven.
+	hintW, hintH int             // de CREATE-wens
+	win          image.Rectangle // window incl. chrome; leeg = nog niet geplaatst
+	screen       image.Rectangle // content-rechthoek op het scherm
+	minimized    bool            // uit beeld (taskbar-knop, of een dicht menu)
+	menu         bool            // CREATE.Role menu: het startmenu (de launcher)
 }
 
 // Size geeft de huidige (WM-)maat van de surface.
@@ -123,16 +130,22 @@ func (s *Surface) resize(w, h int) {
 	s.w, s.h, s.back, s.front = w, h, back, front
 }
 
-// Compositor componeert alle surfaces in een grid naar één RGBA-beeld.
+// Compositor componeert alle surfaces als zwevende windows naar één RGBA-beeld.
 type Compositor struct {
 	mu       sync.Mutex
 	img      *image.RGBA
-	surfaces []*Surface
+	surfaces []*Surface // aanmaakvolgorde — de taskbar
+	zstack   []*Surface // stapelvolgorde, achter → voor
 	focus    *Surface
 	dirty    bool
 	gen      uint64
 	titleH   int
+	taskH    int
 	scale    int
+	cascade  image.Point
+
+	drag    *Surface    // window aan de muis (titelbalk-sleep)
+	dragOff image.Point // muis − win.Min bij het oppakken
 
 	onResize func(s *Surface, w, h int)
 
@@ -151,11 +164,14 @@ func New(w, h int) *Compositor {
 	if h >= 720 {
 		scale = 2 // zelfde regel als de fb-console: echt scherm → 2×
 	}
+	titleH := 8*scale + 6
 	return &Compositor{
 		img:      image.NewRGBA(image.Rect(0, 0, w, h)),
 		dirty:    true,
 		scale:    scale,
-		titleH:   8*scale + 6,
+		titleH:   titleH,
+		taskH:    titleH + 8,
+		cascade:  image.Pt(margin*2, margin*2),
 		frameLog: make(map[uint64][]image.Rectangle),
 	}
 }
@@ -171,17 +187,26 @@ func (c *Compositor) Size() (w, h int) {
 	return b.Dx(), b.Dy()
 }
 
-// Add voegt een surface toe (nieuwe windows krijgen focus). hintW/hintH is
-// de wens van de app — v1 negeert hem (het grid beslist); hij bestaat voor
-// latere aspect/schaal-keuzes. Roep daarna Relayout aan (ná registratie van
-// de eigenaar) om de echte maat toe te kennen.
-func (c *Compositor) Add(name string, hintW, hintH int) *Surface {
-	_ = hintW
-	_ = hintH
-	s := &Surface{Name: name}
+// work is het vlak boven de taskbar waar windows leven (onder c.mu).
+func (c *Compositor) workLocked() image.Rectangle {
+	b := c.img.Bounds()
+	return image.Rect(b.Min.X, b.Min.Y, b.Max.X, b.Max.Y-c.taskH)
+}
+
+// Add voegt een surface toe (nieuwe windows komen bovenop en krijgen focus).
+// hintW/hintH is de maatwens van de app — de WM honoreert hem, geklemd op
+// het werkvlak. menu (CREATE.Role) maakt dit het startmenu: verborgen tot de
+// startknop, geen taskbar-knop, geen focus-kaping bij het verschijnen van de
+// app. Roep daarna Relayout aan (ná registratie van de eigenaar) om de maat
+// echt toe te kennen.
+func (c *Compositor) Add(name string, hintW, hintH int, menu bool) *Surface {
+	s := &Surface{Name: name, hintW: hintW, hintH: hintH, menu: menu, minimized: menu}
 	c.mu.Lock()
 	c.surfaces = append(c.surfaces, s)
-	c.focus = s
+	c.zstack = append(c.zstack, s)
+	if !menu {
+		c.focus = s
+	}
 	c.dirty = true
 	c.addDamageLocked(c.img.Bounds())
 	c.mu.Unlock()
@@ -189,30 +214,45 @@ func (c *Compositor) Add(name string, hintW, hintH int) *Surface {
 }
 
 // Remove haalt een surface weg (bv. bij een verbroken verbinding); de focus
-// schuift naar het laatst toegevoegde window dat overblijft. Roep daarna
-// Relayout aan om de rest de vrijgekomen ruimte te geven.
+// schuift naar het bovenste window dat overblijft.
 func (c *Compositor) Remove(s *Surface) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for i, cur := range c.surfaces {
-		if cur == s {
-			c.surfaces = append(c.surfaces[:i], c.surfaces[i+1:]...)
-			break
-		}
+	c.surfaces = without(c.surfaces, s)
+	c.zstack = without(c.zstack, s)
+	if c.drag == s {
+		c.drag = nil
 	}
 	if c.focus == s {
-		c.focus = nil
-		if n := len(c.surfaces); n > 0 {
-			c.focus = c.surfaces[n-1]
-		}
+		c.focus = c.topLocked()
 	}
 	c.dirty = true
 	c.addDamageLocked(c.img.Bounds())
 }
 
-// Relayout verdeelt het scherm (tiling-grid, kolommen ~ vierkant), legt elke
-// surface zijn content-maat op en meldt wijzigingen via OnResize — buiten de
-// lock, want de callback schrijft doorgaans naar een verbinding.
+func without(list []*Surface, s *Surface) []*Surface {
+	for i, cur := range list {
+		if cur == s {
+			return append(list[:i], list[i+1:]...)
+		}
+	}
+	return list
+}
+
+// topLocked is het bovenste niet-geminimaliseerde window (nil = geen).
+func (c *Compositor) topLocked() *Surface {
+	for i := len(c.zstack) - 1; i >= 0; i-- {
+		if !c.zstack[i].minimized {
+			return c.zstack[i]
+		}
+	}
+	return nil
+}
+
+// Relayout plaatst nieuwe windows (cascade, hint-maat geklemd op het
+// werkvlak) en meldt maat-toekenningen via OnResize — buiten de lock, want
+// de callback schrijft doorgaans naar een verbinding. Bestaande windows
+// blijven waar ze staan: dat is het hele punt.
 func (c *Compositor) Relayout() {
 	type change struct {
 		s    *Surface
@@ -221,30 +261,36 @@ func (c *Compositor) Relayout() {
 	var changes []change
 
 	c.mu.Lock()
-	if n := len(c.surfaces); n > 0 {
-		bounds := c.img.Bounds()
-		cols := 1
-		for cols*cols < n {
-			cols++
+	work := c.workLocked()
+	for _, s := range c.surfaces {
+		if !s.win.Empty() {
+			continue // al geplaatst: blijft staan
 		}
-		rows := (n + cols - 1) / cols
-		cellW := (bounds.Dx() - (cols+1)*margin) / cols
-		cellH := (bounds.Dy() - (rows+1)*margin) / rows
+		// Content-maat: de hint, geklemd op wat er past (en nooit 0×0).
+		cw := clamp(s.hintW, 8, work.Dx()-2)
+		ch := clamp(s.hintH, 8, work.Dy()-c.titleH-1-margin)
+		winW, winH := cw+2, ch+c.titleH+1
 
-		for i, s := range c.surfaces {
-			col, row := i%cols, i/cols
-			x0 := margin + col*(cellW+margin)
-			y0 := margin + row*(cellH+margin)
-			win := image.Rect(x0, y0, x0+cellW, y0+cellH)
-			content := image.Rect(win.Min.X+1, win.Min.Y+c.titleH, win.Max.X-1, win.Max.Y-1)
-			if content.Dx() < 8 || content.Dy() < 8 {
-				content.Max = content.Min.Add(image.Pt(8, 8)) // vloer: nooit 0×0
+		var pos image.Point
+		if s.menu {
+			// Het startmenu klapt boven de startknop uit — vaste plek.
+			pos = image.Pt(4, work.Max.Y-winH)
+		} else {
+			// Cascade: elk nieuw window een titelbalk lager/rechts; past de
+			// stap niet meer, dan terug naar de start.
+			pos = c.cascade
+			if pos.X+winW > work.Max.X || pos.Y+winH > work.Max.Y {
+				pos = image.Pt(margin, margin)
+				c.cascade = pos
 			}
-			s.win, s.screen = win, content
-			if w, h := s.Size(); w != content.Dx() || h != content.Dy() {
-				s.resize(content.Dx(), content.Dy())
-				changes = append(changes, change{s, content.Dx(), content.Dy()})
-			}
+			c.cascade = c.cascade.Add(image.Pt(c.titleH+6, c.titleH+6))
+		}
+
+		s.win = image.Rect(pos.X, pos.Y, pos.X+winW, pos.Y+winH)
+		s.screen = image.Rect(s.win.Min.X+1, s.win.Min.Y+c.titleH, s.win.Max.X-1, s.win.Max.Y-1)
+		if w, h := s.Size(); w != cw || h != ch {
+			s.resize(cw, ch)
+			changes = append(changes, change{s, cw, ch})
 		}
 	}
 	c.dirty = true
@@ -259,6 +305,16 @@ func (c *Compositor) Relayout() {
 			f(ch.s, ch.w, ch.h)
 		}
 	}
+}
+
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 // Present flipt back→front voor deze surface en markeert het scherm vuil.
@@ -290,9 +346,11 @@ func (c *Compositor) PresentRects(s *Surface, rects []image.Rectangle) {
 	s.mu.Unlock()
 
 	c.mu.Lock()
-	c.dirty = true
-	for _, r := range clipped {
-		c.addDamageLocked(r.Add(s.screen.Min).Intersect(s.screen))
+	if !s.minimized {
+		c.dirty = true
+		for _, r := range clipped {
+			c.addDamageLocked(r.Add(s.screen.Min).Intersect(s.screen))
+		}
 	}
 	c.mu.Unlock()
 }
@@ -305,37 +363,188 @@ func (c *Compositor) addDamageLocked(r image.Rectangle) {
 	}
 }
 
-// SurfaceAt zoekt de surface onder schermpunt (x,y) en geeft de lokale
-// surface-coördinaten terug.
+// --- input: de muis is van de WM tot hij van de app is -----------------------
+
+// SurfaceAt is de pure vraag: welke content ligt (bovenop) onder schermpunt
+// (x,y), met surface-lokale coördinaten. Geminimaliseerde windows tellen niet.
 func (c *Compositor) SurfaceAt(x, y int) (s *Surface, lx, ly int, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.contentAtLocked(x, y)
+}
+
+func (c *Compositor) contentAtLocked(x, y int) (s *Surface, lx, ly int, ok bool) {
 	p := image.Pt(x, y)
-	for _, cur := range c.surfaces {
+	for i := len(c.zstack) - 1; i >= 0; i-- {
+		cur := c.zstack[i]
+		if cur.minimized {
+			continue
+		}
 		if p.In(cur.screen) {
 			return cur, x - cur.screen.Min.X, y - cur.screen.Min.Y, true
+		}
+		if p.In(cur.win) {
+			return nil, 0, 0, false // chrome (titelbalk/rand) vangt de muis
 		}
 	}
 	return nil, 0, 0, false
 }
 
-// ClickAt zet de focus op het window onder (x,y) — de klik zelf routeert de
-// server daarna naar diezelfde surface.
-func (c *Compositor) ClickAt(x, y int) (s *Surface, lx, ly int, ok bool) {
-	s, lx, ly, ok = c.SurfaceAt(x, y)
-	if ok {
-		c.mu.Lock()
-		if c.focus != s {
-			if c.focus != nil {
-				c.addDamageLocked(c.focus.win)
-			}
-			c.focus = s
-			c.addDamageLocked(s.win)
-			c.dirty = true
+// PointerDown verwerkt een muis-down: taskbar-knoppen, titelbalk (raise +
+// sleep), of content (raise + doorsturen). ok=true betekent: dit is voor de
+// app, op surface-lokale coördinaten.
+func (c *Compositor) PointerDown(x, y int) (s *Surface, lx, ly int, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	p := image.Pt(x, y)
+
+	// Taskbar eerst: die ligt altijd bovenop.
+	if p.Y >= c.workLocked().Max.Y {
+		if p.In(c.startRectLocked()) {
+			c.startToggleLocked()
+			return nil, 0, 0, false
 		}
-		c.mu.Unlock()
+		for i, sur := range c.taskItemsLocked() {
+			if p.In(c.taskRectLocked(i)) {
+				c.taskToggleLocked(sur)
+				return nil, 0, 0, false
+			}
+		}
+		return nil, 0, 0, false
 	}
-	return s, lx, ly, ok
+
+	// Een open startmenu sluit bij een klik ernaast (het startmenu-gebaar);
+	// de klik zelf gaat daarna gewoon door naar wat eronder ligt.
+	if m := c.menuLocked(); m != nil && !m.minimized && !p.In(m.win) {
+		m.minimized = true
+		if c.focus == m {
+			c.focus = c.topLocked()
+		}
+		c.dirty = true
+		c.addDamageLocked(c.img.Bounds())
+	}
+
+	for i := len(c.zstack) - 1; i >= 0; i-- {
+		cur := c.zstack[i]
+		if cur.minimized || !p.In(cur.win) {
+			continue
+		}
+		c.raiseLocked(cur)
+		bar := image.Rect(cur.win.Min.X, cur.win.Min.Y, cur.win.Max.X, cur.win.Min.Y+c.titleH)
+		if p.In(bar) {
+			c.drag = cur // slepen begint; Move verplaatst, Up laat los
+			c.dragOff = p.Sub(cur.win.Min)
+			return nil, 0, 0, false
+		}
+		if p.In(cur.screen) {
+			return cur, x - cur.screen.Min.X, y - cur.screen.Min.Y, true
+		}
+		return nil, 0, 0, false // de rand
+	}
+	return nil, 0, 0, false
+}
+
+// PointerMove verwerkt een muisbeweging: een lopende sleep verplaatst het
+// window, anders is het hover voor de app onder de aanwijzer.
+func (c *Compositor) PointerMove(x, y int) (s *Surface, lx, ly int, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.drag != nil {
+		c.moveDragLocked(x, y)
+		return nil, 0, 0, false
+	}
+	return c.contentAtLocked(x, y)
+}
+
+// PointerUp beëindigt een sleep, of levert de button-up bij de app af.
+func (c *Compositor) PointerUp(x, y int) (s *Surface, lx, ly int, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.drag != nil {
+		c.moveDragLocked(x, y)
+		c.drag = nil
+		return nil, 0, 0, false
+	}
+	return c.contentAtLocked(x, y)
+}
+
+// moveDragLocked schuift het gesleepte window naar de muis, geklemd op het
+// werkvlak (de titelbalk blijft altijd pakbaar).
+func (c *Compositor) moveDragLocked(x, y int) {
+	s := c.drag
+	work := c.workLocked()
+	sz := s.win.Size()
+	nx := clamp(x-c.dragOff.X, work.Min.X, work.Max.X-sz.X)
+	ny := clamp(y-c.dragOff.Y, work.Min.Y, work.Max.Y-sz.Y)
+	d := image.Pt(nx, ny).Sub(s.win.Min)
+	if d == (image.Point{}) {
+		return
+	}
+	c.addDamageLocked(s.win)
+	s.win = s.win.Add(d)
+	s.screen = s.screen.Add(d)
+	c.addDamageLocked(s.win)
+	c.dirty = true
+}
+
+// raiseLocked brengt s naar voren en geeft hem focus.
+func (c *Compositor) raiseLocked(s *Surface) {
+	if c.focus != s {
+		if c.focus != nil {
+			c.addDamageLocked(c.focus.win)
+		}
+		c.focus = s
+	}
+	c.zstack = append(without(c.zstack, s), s)
+	c.addDamageLocked(s.win)
+	c.addDamageLocked(c.taskbarLocked())
+	c.dirty = true
+}
+
+// taskToggleLocked is de taskbar-knop: naar voren halen — en als hij al
+// voor én gefocust is, minimaliseren (het Windows-gebaar).
+func (c *Compositor) taskToggleLocked(s *Surface) {
+	switch {
+	case s.minimized:
+		s.minimized = false
+		c.raiseLocked(s)
+	case c.focus == s:
+		s.minimized = true
+		c.focus = c.topLocked()
+	default:
+		c.raiseLocked(s)
+	}
+	c.dirty = true
+	c.addDamageLocked(c.img.Bounds())
+}
+
+// startToggleLocked is de startknop: het startmenu ís de app die zich met
+// CREATE.Role menu meldde (de launcher) — open/dicht. Zonder menu: niets.
+func (c *Compositor) startToggleLocked() {
+	if m := c.menuLocked(); m != nil {
+		c.taskToggleLocked(m)
+	}
+}
+
+// menuLocked is het (laatst gemelde) startmenu-surface, nil zonder.
+func (c *Compositor) menuLocked() *Surface {
+	for i := len(c.surfaces) - 1; i >= 0; i-- {
+		if c.surfaces[i].menu {
+			return c.surfaces[i]
+		}
+	}
+	return nil
+}
+
+// taskItemsLocked zijn de windows mét een taskbar-knop (menu's niet).
+func (c *Compositor) taskItemsLocked() []*Surface {
+	items := make([]*Surface, 0, len(c.surfaces))
+	for _, s := range c.surfaces {
+		if !s.menu {
+			items = append(items, s)
+		}
+	}
+	return items
 }
 
 // Focused geeft het window met toetsenbord-focus (nil zonder windows).
@@ -344,6 +553,33 @@ func (c *Compositor) Focused() *Surface {
 	defer c.mu.Unlock()
 	return c.focus
 }
+
+// --- taskbar-geometrie (onder c.mu) ------------------------------------------
+
+func (c *Compositor) taskbarLocked() image.Rectangle {
+	b := c.img.Bounds()
+	return image.Rect(b.Min.X, b.Max.Y-c.taskH, b.Max.X, b.Max.Y)
+}
+
+func (c *Compositor) startRectLocked() image.Rectangle {
+	bar := c.taskbarLocked()
+	w := pixel.StringWidth("hop", c.scale) + 12*c.scale
+	return image.Rect(bar.Min.X+4, bar.Min.Y+4, bar.Min.X+4+w, bar.Max.Y-4)
+}
+
+// taskRectLocked is de knop van taskItems[i]: vaste breedte, naast de start.
+func (c *Compositor) taskRectLocked(i int) image.Rectangle {
+	bar := c.taskbarLocked()
+	x0 := c.startRectLocked().Max.X + 6
+	avail := bar.Max.X - 4 - x0
+	w := 120 * c.scale
+	if n := len(c.taskItemsLocked()); n > 0 && w*n > avail {
+		w = avail / n
+	}
+	return image.Rect(x0+i*w, bar.Min.Y+4, x0+(i+1)*w-4, bar.Max.Y-4)
+}
+
+// --- compose -------------------------------------------------------------------
 
 // Compose hertekent het scherm als er iets veranderd is en geeft het
 // generatienummer terug (verhoogt alleen bij een echte hertekening — de
@@ -406,9 +642,9 @@ func (c *Compositor) composeLocked() (gen uint64, changed bool) {
 }
 
 // redrawRegionLocked hertekent één schermregio deterministisch: achtergrond,
-// dan van elk snijdend window de geraakte delen. Titelbalk en rand worden
-// bij een snijding integraal hertekend (goedkoop en scheelt clip-logica in
-// de tekst-glyphs — dezelfde pixels opnieuw schrijven is onschadelijk).
+// dan de windows van achter naar voor (de stapelvolgorde), dan de taskbar.
+// Titelbalk en rand worden bij een snijding integraal hertekend (goedkoop en
+// scheelt clip-logica in de tekst-glyphs).
 func (c *Compositor) redrawRegionLocked(clip image.Rectangle) {
 	clip = clip.Intersect(c.img.Bounds())
 	if clip.Empty() {
@@ -416,8 +652,8 @@ func (c *Compositor) redrawRegionLocked(clip image.Rectangle) {
 	}
 	pixel.Fill(c.img, clip, colBG)
 
-	for _, s := range c.surfaces {
-		if !s.win.Overlaps(clip) {
+	for _, s := range c.zstack {
+		if s.minimized || !s.win.Overlaps(clip) {
 			continue
 		}
 		title, border := colTitleIdle, colBorderIdle
@@ -457,6 +693,44 @@ func (c *Compositor) redrawRegionLocked(clip image.Rectangle) {
 		}
 
 		pixel.Outline(c.img, s.win, border)
+	}
+
+	if bar := c.taskbarLocked(); bar.Overlaps(clip) {
+		c.drawTaskbarLocked()
+	}
+}
+
+// drawTaskbarLocked tekent de taskbar: startknop + een knop per window.
+// Gefocust = accent, geminimaliseerd = alleen een rand — één oogopslag.
+func (c *Compositor) drawTaskbarLocked() {
+	bar := c.taskbarLocked()
+	pixel.Fill(c.img, bar, colBar)
+	pixel.Fill(c.img, image.Rect(bar.Min.X, bar.Min.Y, bar.Max.X, bar.Min.Y+1), colBorderIdle)
+
+	start := c.startRectLocked()
+	pixel.Fill(c.img, start, colTitleFocus)
+	pixel.DrawStringCentered(c.img, start, c.scale, colText, "hop")
+
+	ty := bar.Min.Y + (c.taskH-8*c.scale)/2
+	for i, s := range c.taskItemsLocked() {
+		r := c.taskRectLocked(i)
+		if r.Dx() <= 8 {
+			break // voller dan vol: liever geen knoppen dan onklikbare
+		}
+		txt, col := colText, colTitleIdle
+		switch {
+		case s.minimized:
+			txt, col = colTextDim, colBar
+		case s == c.focus:
+			col = colTitleFocus
+		}
+		pixel.Fill(c.img, r, col)
+		pixel.Outline(c.img, r, colBorderIdle)
+		name := s.Name
+		if max := (r.Dx() - 8*c.scale) / (8 * c.scale); len(name) > max && max > 1 {
+			name = name[:max-1] + "."
+		}
+		pixel.DrawString(c.img, r.Min.X+4*c.scale, ty, c.scale, txt, name)
 	}
 }
 
