@@ -24,14 +24,14 @@ GUI code. Design dossier (the negotiated source of truth, Dutch):
 | `app/ui/` | small app helpers: keycode→rune, short durations (host-tested) |
 | `app/clock/` | the demo clock face |
 | `app/calc/` | calculator logic + its scene tree (host-tested) |
-| `app/browse/` | browser layout + rendering on top of [gost-dom](https://github.com/gost-dom/browser) (host-tested) |
+| `app/browse/` | the browser: x/net/html DOM + cascadia selectors + own fetch/CSS/layout/rendering (host-tested) |
 | `app/hopapi/` | client for HOP's `/v1` API with HMAC request signing — reads, `Apply`, `Delete` and SSE `Logs` (host-tested) |
 | `app/taskman/` | taskmanager as a scene app: AGENTS/TASKS, per-job task details, live log tail per task (host-tested) |
 | `app/launcher/` | launcher as a scene app: the boot-config app catalog as buttons, click toggles start/stop (host-tested) |
 | `cmd/display` | the display server app (SURF on :7878, HTTP on :80) |
 | `cmd/clock` | the pixel demo app: an analog clock from anywhere in the cluster |
 | `cmd/calc` | scene app: the display renders the keypad, every keypress is one PATCH of the display value |
-| `cmd/browser` | a real web browser (pixel app): gost-dom fetches + parses, `browse/` lays out on the 8x8 font (`SURF_HOME` = start page) |
+| `cmd/browser` | a real web browser (pixel app): `browse/` fetches, parses and lays out (`SURF_HOME` = start page) |
 | `cmd/dash` | the P2 proof app: a dashboard that measures and shows its own wire traffic |
 | `cmd/taskman` | the cluster watching itself: agents → jobs → tasks → live logs (SSE), each log line one PATCH (`HOP_ADDR=<node>:8080`, `HOP_KEY` = cluster API key, empty = no auth) |
 | `cmd/launcher` | the desktop starting itself: buttons from `HOPOS_APPS` (the `hopos.apps[]` boot-config catalog, `{{host}}` resolved by HopOS — see HopOS `docs/config.md`); click starts, click again stops |
@@ -59,16 +59,23 @@ SCREENSHOT_OUT=$PWD/docs/launcher.png go test ./app/launcher -run Screenshot
 ![taskman](docs/taskman.png)
 ![launcher](docs/launcher.png)
 
-The browser renders real news sites (mobile view, live network — these
-refresh on every test run that touches `app/browse`):
+The browser renders real news sites (live network — these refresh on
+every test run that touches `app/browse`). Same page, two frame widths:
+`@media` is evaluated against the real width, so 480 gets the mobile CSS
+and 1280 the desktop layout (real flex/grid columns):
 
 ```sh
-go test ./app/browse -run ScreenshotSites   # writes docs/browser-<site>.png
+go test ./app/browse -run ScreenshotSites   # writes docs/browser-<site>[-desktop].png
 ```
 
-| tweakers.net | nrc.nl | nu.nl |
-|---|---|---|
-| ![tweakers](docs/browser-tweakers.png) | ![nrc](docs/browser-nrc.png) | ![nu](docs/browser-nu.png) |
+| tweakers.net | nrc.nl | nu.nl | gethop.org/hop/ |
+|---|---|---|---|
+| ![tweakers](docs/browser-tweakers.png) | ![nrc](docs/browser-nrc.png) | ![nu](docs/browser-nu.png) | ![gethop](docs/browser-gethop.png) |
+
+![tweakers desktop](docs/browser-tweakers-desktop.png)
+![nrc desktop](docs/browser-nrc-desktop.png)
+![nu desktop](docs/browser-nu-desktop.png)
+![gethop desktop](docs/browser-gethop-desktop.png)
 
 ## Windows, not tiles
 

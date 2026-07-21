@@ -12,7 +12,7 @@ import (
 )
 
 // testsite is een mini-web: twee pagina's met een relatieve link ertussen —
-// via gost-doms WithHandler, dus zonder sockets.
+// via de handler-transport, dus zonder sockets.
 func testsite() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -85,7 +85,7 @@ func TestLayoutKetenEnNavigatie(t *testing.T) {
 	if got := v.Hit(link.R.Min.X+1, link.R.Min.Y+BarH+1, link.R.Min.Y+BarH+2); got != "" {
 		t.Fatalf("klik op de statusbalk gaf een link: %q", got)
 	}
-	if err := s.Follow(href); err != nil { // relatief: gost-dom lost op
+	if err := s.Follow(href); err != nil { // relatief: resolve tegen de pagina
 		t.Fatalf("Follow: %v", err)
 	}
 	if got := s.URL(); !strings.HasSuffix(got, "/twee") {
@@ -290,8 +290,21 @@ p { color: navy; } /* zelfde specificiteit, later wint */
 	if b := find(p, "waarschuwing"); b == nil || b.Col != (color.RGBA{0xCC, 0x00, 0x00, 0xFF}) {
 		t.Fatalf("class-kleur (#c00) niet toegepast: %+v", b)
 	}
-	if b := find(p, "gemarkeerd"); b == nil || !b.HasBG || b.BG != (color.RGBA{255, 235, 59, 0xFF}) {
-		t.Fatalf("background-color (rgb) niet toegepast: %+v", b)
+	// Sinds de inline-doos ligt de achtergrond als vlak achter de tekst,
+	// niet meer op de tekstrun zelf.
+	if b := find(p, "gemarkeerd"); b == nil {
+		t.Fatal("gemarkeerde tekst niet gevonden")
+	} else {
+		geel := false
+		for i := range p.Boxes {
+			v := &p.Boxes[i]
+			if v.HasBG && v.BG == (color.RGBA{255, 235, 59, 0xFF}) && b.R.Overlaps(v.R.Inset(-2)) {
+				geel = true
+			}
+		}
+		if !geel {
+			t.Fatalf("background-color (rgb) niet als vlak achter de tekst: %+v", b)
+		}
 	}
 	for _, weg := range []string{"cookiebanner", "nog een banner", "attribuut-verborgen"} {
 		if find(p, weg) != nil {
@@ -470,8 +483,9 @@ body { background: var(--bg); color: white; }
 
 func TestGridKaarten(t *testing.T) {
 	// gethop-vormig: een grid met twee <a class=door>-kaarten, elk met
-	// achtergrond en rand. De kaarten horen onder elkaar (mobiele
-	// breakpoint), elk met een vlak + rand, en de tekst met binnenmarge.
+	// achtergrond en rand. grid-template-columns: 1fr 1fr betekent twee
+	// échte kolommen: de kaarten naast elkaar, elk met vlak + rand en de
+	// tekst met binnenmarge.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html><head><style>
@@ -496,8 +510,11 @@ func TestGridKaarten(t *testing.T) {
 	if een == nil || twee == nil {
 		t.Fatal("kaartteksten niet gevonden")
 	}
-	if een.R.Min.Y == twee.R.Min.Y {
-		t.Fatalf("kaarten horen onder elkaar: %v vs %v", een.R, twee.R)
+	if een.R.Min.Y != twee.R.Min.Y {
+		t.Fatalf("kaarten horen naast elkaar (1fr 1fr): %v vs %v", een.R, twee.R)
+	}
+	if twee.R.Min.X <= een.R.Max.X {
+		t.Fatalf("tweede kaart hoort rechts van de eerste: %v vs %v", een.R, twee.R)
 	}
 	var vlakken []*Box
 	for i := range p.Boxes {
@@ -527,16 +544,31 @@ func TestParseCSS(t *testing.T) {
 	rules := parseCSS(`a { color: red; margin: 4px } /* junk */ b,i{font-weight:700}
 @media screen { .x { color: blue } } .leeg { margin: 0 }
 @media (min-width: 900px) { .desktop { color: green } }`, 0)
-	// a (color), b en i (font-weight), .x (@media screen matcht: wij zijn
-	// een scherm); .leeg (alleen margin) en het min-width-blok (desktop,
-	// wij zijn 480) vallen weg.
-	if len(rules) != 4 {
-		t.Fatalf("wil 4 regels, kreeg %d: %+v", len(rules), rules)
+	// a (color+margin: boxmodel!), b en i (font-weight), .x (@media screen),
+	// .leeg (margin) én .desktop — media-condities reizen mee en worden pas
+	// bij het cascaden tegen de framebreedte geëvalueerd.
+	if len(rules) != 6 {
+		t.Fatalf("wil 6 regels, kreeg %d: %+v", len(rules), rules)
 	}
 	if rules[3].sel != ".x" || rules[3].decls["color"] != "blue" {
 		t.Fatalf(".x uit @media screen mist: %+v", rules[3])
 	}
-	if rules[0].decls["color"] != "red" || rules[0].decls["margin"] != "" {
+	if rules[0].decls["margin"] != "4px" {
+		t.Fatalf("margin hoort gedragen te zijn: %+v", rules[0])
+	}
+	var desk *cssRule
+	for i := range rules {
+		if rules[i].sel == ".desktop" {
+			desk = &rules[i]
+		}
+	}
+	if desk == nil || len(desk.mq) != 1 {
+		t.Fatalf(".desktop hoort er te zijn, mét zijn media-conditie: %+v", rules)
+	}
+	if ruleMediaOK(desk.mq, 480) || !ruleMediaOK(desk.mq, 1024) {
+		t.Fatalf("desktop-conditie hoort op 480 uit en op 1024 aan te staan: %v", desk.mq)
+	}
+	if rules[0].decls["color"] != "red" {
 		t.Fatalf("a-regel klopt niet: %+v", rules[0])
 	}
 	if rules[1].sel != "b" || rules[2].sel != "i" {
@@ -585,9 +617,9 @@ func TestCACertBundel(t *testing.T) {
 }
 
 func TestEchteFoutInStatus(t *testing.T) {
-	// gost-dom vouwt elke niet-200 plat tot "Non-ok Response"; de proxy
-	// hoort de échte fout door te geven.
-	s := NewSession() // met netProxy — de fetch faalt op DNS, niet op een handler
+	// De fout van de lijn hoort onvervormd in de statusbalk te komen —
+	// geen platgeslagen tussenlaag ("Non-ok Response") meer.
+	s := NewSession() // echt netwerk — de fetch faalt op DNS, niet op een handler
 	err := s.Go("http://xn--dit-bestaat-echt-niet-4ob.invalid/")
 	if err == nil {
 		t.Skip("onverwacht: .invalid resolvet hier")

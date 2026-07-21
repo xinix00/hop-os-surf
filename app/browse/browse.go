@@ -1,20 +1,21 @@
-// Package browse is de browser achter cmd/browser: gost-dom levert de DOM
-// (fetch + HTML-parsing, zonder rendering — het is een headless browser),
-// dit pakket doet wat gost-dom bewust niet doet: layout en pixels. Eén
-// flow-layout op het 8x8-font — blokken, woordwrap, koppen, links — genoeg
-// om echte pagina's leesbaar te maken en links klikbaar. Los van main zodat
-// de host-tests de hele keten (HTML → boxes → pixels → hit-test) kunnen
-// draaien; net als calc/ is alleen de main tamago-only.
+// Package browse is de browser achter cmd/browser: x/net/html levert de
+// DOM (de WHATWG-parser), cascadia de selectors, de Session het netwerk —
+// dit pakket doet de rest: layout en pixels. Eén flow-layout op het
+// Spleen-font — blokken, woordwrap, koppen, links, floats, gepinde
+// headers — genoeg om echte pagina's leesbaar te maken en links klikbaar.
+// Los van main zodat de host-tests de hele keten (HTML → boxes → pixels →
+// hit-test) kunnen draaien; net als calc/ is alleen de main tamago-only.
 package browse
 
 import (
 	"image"
 	"image/color"
 	"image/draw"
+	"net/url"
 	"strconv"
 	"strings"
 
-	"github.com/gost-dom/browser/dom"
+	"golang.org/x/net/html"
 
 	"github.com/xinix00/hop-os-surf/app/ui"
 	"github.com/xinix00/hop-os-surf/stack/pixel"
@@ -107,7 +108,7 @@ type Field struct {
 	Name   string
 	Value  string
 	Submit bool
-	node   dom.Node // het <input>-element: sleutel voor Session.Type/Submit
+	node   *html.Node // het <input>-element: sleutel voor Session.Type/Submit
 }
 
 // Page is het layout-resultaat voor één breedte; bij een resize opnieuw
@@ -139,6 +140,7 @@ type style struct {
 	center   bool // text-align:center / <center>
 	inline   bool // in een flex/inline-context: blokken breken hier niet
 	blockify bool // direct kind van een grid/flex-kolom: word een blok (ook een <a>)
+	rIndent  int  // inspringing vanaf rechts (marges/padding van blokken)
 	bg       color.RGBA
 	hasBG    bool
 	on       color.RGBA // effectieve achtergrond ónder de tekst (contrastbewaking)
@@ -162,16 +164,22 @@ type layouter struct {
 	space  bool // er hoort witruimte vóór het volgende woord
 	gap    int  // opgespaarde blokmarge (collapsing): pas toe bij het volgende woord
 	imgs   map[string]image.Image
-	styles map[dom.Node]props
-	edits  map[dom.Node]string // door de gebruiker ingetikte veldwaarden
-	line0  int                 // index van de eerste box op de huidige regel (voor centreren)
-	center bool                // deze regel centreren bij breakLine
-	fL, fR flt                 // actieve floats links en rechts
-	depth  int                 // blokdiepte tijdens de wandeling
+	styles map[*html.Node]props
+	edits  map[*html.Node]string // door de gebruiker ingetikte veldwaarden
+	line0  int                   // index van de eerste box op de huidige regel (voor centreren)
+	center bool                  // deze regel centreren bij breakLine
+	fL, fR flt                   // actieve floats links en rechts
+	depth  int                   // blokdiepte tijdens de wandeling
 
 	pageBG    color.RGBA // body-achtergrond: het paginacanvas (Page.BG)
 	hasPageBG bool
 	pin       pinState
+
+	origins  []image.Point // gepositioneerde voorouders (containing blocks)
+	late     []Box         // absolute boxes: geschilderd ná de flow (erbovenop)
+	absEl    *html.Node    // absolute() legt dit element zelf — geen recursie
+	icon     image.Image   // site-icoon (apple-touch-icon) voor het logo-slot
+	iconUsed bool          // één logo-slot per pagina: het eerste (de header)
 }
 
 // pinState volgt de header die gepind gaat worden: tussen beginPin en
@@ -224,8 +232,8 @@ func (l *layouter) lineLeft(indent int) int {
 	return x
 }
 
-func (l *layouter) lineRight() int {
-	r := l.width - pad
+func (l *layouter) lineRight(rIndent int) int {
+	r := l.width - pad - rIndent
 	if l.fR.w > 0 && l.y < l.fR.bot {
 		r -= l.fR.w
 	}
@@ -235,7 +243,7 @@ func (l *layouter) lineRight() int {
 // Layout wandelt de DOM onder body en vouwt hem tot boxes voor deze
 // paginabreedte. Onbekende elementen erven gewoon door — een pagina met
 // <article> of <custom-tag> blijft leesbaar.
-func Layout(body dom.Node, width int) Page {
+func Layout(body *html.Node, width int) Page {
 	return LayoutWithImages(body, width, nil)
 }
 
@@ -243,57 +251,31 @@ func Layout(body dom.Node, width int) Page {
 // het rauwe src-attribuut (Session lost de URL's op en haalt ze binnen —
 // layout blijft puur en synchroon). Een <img> zonder plaatje valt terug op
 // zijn alt-tekst.
-func LayoutWithImages(body dom.Node, width int, imgs map[string]image.Image) Page {
+func LayoutWithImages(body *html.Node, width int, imgs map[string]image.Image) Page {
 	return layoutStyled(body, width, imgs, nil, nil, nil)
 }
 
 // layoutStyled is de volledige variant: mét de computed CSS-props uit
-// Session.loadStyles, de ingetikte veldwaarden en de site-identiteit voor
-// de kopbalk. Inline style=""-attributen werken altijd, ook zonder die map.
-func layoutStyled(body dom.Node, width int, imgs map[string]image.Image, styles map[dom.Node]props, edits map[dom.Node]string, site *siteID) Page {
-	l := &layouter{width: width, imgs: imgs, styles: styles, edits: edits}
-	if site != nil {
-		l.siteBar(site)
-	}
+// Session.stylesFor en de ingetikte veldwaarden. Inline style=""-
+// attributen werken altijd, ook zonder die map.
+func layoutStyled(body *html.Node, width int, imgs map[string]image.Image, styles map[*html.Node]props, edits map[*html.Node]string, icon image.Image) Page {
+	l := &layouter{width: width, imgs: imgs, styles: styles, edits: edits, icon: icon}
 	if body != nil {
 		l.walk(body, style{scale: 1, col: colText})
 	}
 	l.breakLine()
 	p := Page{Boxes: merge(l.boxes), Fields: l.fields, Height: l.y, BG: l.pageBG, HasBG: l.hasPageBG}
+	// Absolute boxes schilderen bovenop de flow (paint-volgorde: laatst).
+	for _, b := range l.late {
+		p.Boxes = append(p.Boxes, b)
+		if b.R.Max.Y > p.Height {
+			p.Height = b.R.Max.Y
+		}
+	}
 	if l.pin.done {
 		p.PinY0, p.PinY1 = l.pin.y0, l.pin.y1
 	}
 	return p
-}
-
-// siteBar legt de site-identiteit als kopbalk bovenin het document: icoon
-// + naam op de themakleur. Geen chrome — hij scrollt gewoon mee, zoals de
-// header van de site zelf; klikken gaat naar de voorpagina ("/"). Zo is
-// élke site herkenbaar, ook nu wij logo's (SVG) niet kunnen rasteren.
-func (l *layouter) siteBar(id *siteID) {
-	const h = 40
-	txt := colBarTxt
-	if luma(id.theme) > 140 {
-		txt = colText // lichte themakleur → donkere tekst
-	}
-	l.boxes = append(l.boxes, Box{R: image.Rect(0, 0, l.width, h), Col: id.theme, Rule: true})
-	x := pad
-	if id.icon != nil {
-		const ic = 32
-		l.boxes = append(l.boxes, Box{R: image.Rect(x, (h-ic)/2, x+ic, (h-ic)/2+ic), Img: scaleTo(id.icon, ic, ic), Href: "/"})
-		x += ic + 8
-	}
-	name := ascii(id.name)
-	if max := (l.width - x - pad) / charW(2); len(name) > max && max > 3 {
-		name = name[:max]
-	}
-	ww := textW(name, 2)
-	l.boxes = append(l.boxes, Box{
-		R: image.Rect(x, (h-16)/2, x+ww, (h-16)/2+16), Text: name, Scale: 2,
-		Col: txt, Bold: true, Href: "/",
-	})
-	l.y = h
-	l.gap = lead // lucht tussen balk en eerste blok, zoals tussen blokken
 }
 
 // luma: waargenomen helderheid 0..255 (ITU-R BT.601) — kiest tekstkleuren
@@ -307,6 +289,32 @@ func absInt(n int) int {
 		return -n
 	}
 	return n
+}
+
+// uaProps is onze user-agent-stylesheet, in dezelfde taal als de site-CSS:
+// berekende waarden die ónder de author-props gemerged worden. Een h1 is
+// dus geen speciaal geval — hij heeft alleen defaults, en de site wint.
+var uaProps = map[string]props{
+	"h1":         {"font-size": "32px", "font-weight": "bold", "color": "#000000"},
+	"h2":         {"font-size": "24px", "font-weight": "bold", "color": "#000000"},
+	"h3":         {"font-size": "20px", "font-weight": "bold", "color": "#000000"},
+	"h4":         {"font-weight": "bold", "color": "#000000"},
+	"h5":         {"font-weight": "bold", "color": "#000000"},
+	"h6":         {"font-weight": "bold", "color": "#000000"},
+	"b":          {"font-weight": "bold"},
+	"strong":     {"font-weight": "bold"},
+	"th":         {"font-weight": "bold"},
+	"code":       {"color": "#6a2a8a"},
+	"kbd":        {"color": "#6a2a8a"},
+	"samp":       {"color": "#6a2a8a"},
+	"pre":        {"color": "#6a2a8a", "white-space": "pre"},
+	"mark":       {"background-color": "gold"},
+	"center":     {"text-align": "center"},
+	"ul":         {"padding-left": "16px"},
+	"ol":         {"padding-left": "16px"},
+	"blockquote": {"padding-left": "16px"},
+	"dd":         {"padding-left": "16px"},
+	"button":     {"background-color": "#e2e6ee"},
 }
 
 // blocks: elementen die een eigen regel (en marge) afdwingen.
@@ -326,10 +334,10 @@ var skip = map[string]bool{
 	"svg": true, "iframe": true, "object": true, "select": true,
 }
 
-func (l *layouter) walk(n dom.Node, st style) {
-	switch n.NodeType() {
-	case dom.NodeTypeText:
-		txt, _ := n.NodeValue()
+func (l *layouter) walk(n *html.Node, st style) {
+	switch n.Type {
+	case html.TextNode:
+		txt := n.Data
 		if st.pre {
 			l.preText(txt, st)
 			return
@@ -345,32 +353,28 @@ func (l *layouter) walk(n dom.Node, st style) {
 		if len(words) > 0 && !isSpace(txt[len(txt)-1]) {
 			l.space = false
 		}
-	case dom.NodeTypeElement:
-		el, ok := n.(dom.Element)
-		if !ok {
-			return
-		}
-		l.element(el, st)
-	case dom.NodeTypeDocument, dom.NodeTypeDocumentFragment:
-		for c := n.FirstChild(); c != nil; c = c.NextSibling() {
+	case html.ElementNode:
+		l.element(n, st)
+	case html.DocumentNode:
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			l.walk(c, st)
 		}
 	}
 }
 
-func (l *layouter) element(el dom.Element, st style) {
-	tag := strings.ToLower(el.TagName())
+func (l *layouter) element(el *html.Node, st style) {
+	tag := el.Data
 	if skip[tag] {
 		return
 	}
-	if _, hidden := el.GetAttribute("hidden"); hidden {
+	if _, hidden := attr(el, "hidden"); hidden {
 		return
 	}
 	// aria-hidden="true" op structuurelementen: het dichtgeklapte JS-menu
 	// (<nav class="full-menu">) en ad-panelen (<aside>) die visueel ook
 	// niemand ziet. Bewust níet op content: nu.nl markeert zijn (zichtbare!)
 	// teaserfoto's als decoratief — die willen we juist wel.
-	if v, ok := el.GetAttribute("aria-hidden"); ok && strings.TrimSpace(v) == "true" {
+	if v, ok := attr(el, "aria-hidden"); ok && strings.TrimSpace(v) == "true" {
 		switch tag {
 		case "nav", "aside", "dialog", "menu":
 			return
@@ -378,13 +382,13 @@ func (l *layouter) element(el dom.Element, st style) {
 	}
 	// <dialog> zonder open is per spec display:none (cookiebanners!).
 	if tag == "dialog" {
-		if _, open := el.GetAttribute("open"); !open {
+		if _, open := attr(el, "open"); !open {
 			return
 		}
 	}
 	// Computed props (uit de stylesheets) + inline style="" (wint altijd).
-	cp := l.styles[dom.Node(el)]
-	if inline, ok := el.GetAttribute("style"); ok && inline != "" {
+	cp := l.styles[el]
+	if inline, ok := attr(el, "style"); ok && inline != "" {
 		if d := parseDecls(inline); d != nil {
 			m := props{}
 			for k, v := range cp {
@@ -420,6 +424,37 @@ func (l *layouter) element(el dom.Element, st style) {
 	if cp["position"] == "fixed" && cp["top"] == "" && cp["bottom"] != "" {
 		return
 	}
+	// position:absolute: uit de flow, op zijn coördinaten t.o.v. de
+	// dichtstbijzijnde gepositioneerde voorouder, en bovenop geschilderd
+	// (badges, labels, overlays). absEl bewaakt de recursie: absolute()
+	// legt dit element daarbinnen als gewoon blok.
+	// Alleen mét een anker (top/left/right/bottom) gaat een absolute echt
+	// uit de flow — zonder coördinaten zou hij als overlay-junk over zijn
+	// broers heen vallen, terwijl de flow-plek precies is waar hij hoort.
+	if cp["position"] == "absolute" && el != l.absEl && !fillAbs(cp) &&
+		(cp["top"] != "" || cp["left"] != "" || cp["right"] != "" || cp["bottom"] != "") {
+		l.absolute(el, cp, st)
+		return
+	}
+	// Elk gepositioneerd element is de containing block voor zijn
+	// absolute nazaten.
+	if p := cp["position"]; p == "relative" || p == "absolute" || p == "fixed" || p == "sticky" {
+		l.origins = append(l.origins, image.Pt(pad+st.indent, l.y))
+		defer func() { l.origins = l.origins[:len(l.origins)-1] }()
+	}
+	// Het logo-slot: een voorpagina-link zonder renderbare inhoud (het
+	// logo is svg of een webcomponent) — het alt-tekst-principe, met het
+	// site-eigen icoon als vulling. Zo staat het logo wáár de site hem
+	// heeft staan, niet in een verzonnen balk.
+	if tag == "a" && l.icon != nil && !l.iconUsed && l.emptyContent(el) {
+		if href, ok := attr(el, "href"); ok && isRootHref(href) {
+			l.iconUsed = true
+			st.href = href
+			l.imageSized(l.icon, 28, 28, st)
+			l.space = true
+			return
+		}
+	}
 	if st.inline {
 		// In een menu-context (flex/nav) hoort lucht tussen de items, ook
 		// als de bron geen witruimte heeft ("</a><a>") — flex-gap, arm.
@@ -440,7 +475,7 @@ func (l *layouter) element(el dom.Element, st style) {
 		l.blockGap(lead)
 		return
 	case "img":
-		if src, _ := el.GetAttribute("src"); l.imgs[src] != nil {
+		if src, _ := attr(el, "src"); l.imgs[src] != nil {
 			fl := cp["float"]
 			if fl != "left" && fl != "right" && st.inline && l.fL.w == 0 && l.fR.w == 0 {
 				// Teaser-patroon: in een flex-rij gaat het (eerste) plaatje
@@ -458,7 +493,7 @@ func (l *layouter) element(el dom.Element, st style) {
 		// alt="" betekent in HTML: decoratief — dan ook géén placeholder.
 		// Zonder dit werd elk icoontje (svg, lazy geladen, mislukt) een
 		// grijze "[img]" en verzoop de pagina in de ruis.
-		alt, hasAlt := el.GetAttribute("alt")
+		alt, hasAlt := attr(el, "alt")
 		if alt = strings.TrimSpace(alt); alt == "" {
 			if hasAlt {
 				return
@@ -471,16 +506,9 @@ func (l *layouter) element(el dom.Element, st style) {
 	case "input":
 		l.input(el, st)
 		return
-	case "button":
-		label := strings.TrimSpace(ascii(el.TextContent()))
-		if label == "" {
-			label, _ = el.GetAttribute("value")
-		}
-		l.widget(el, label, true, st)
-		return
 	case "textarea":
-		val := el.TextContent()
-		if v, ok := l.edits[dom.Node(el)]; ok {
+		val := textContent(el)
+		if v, ok := l.edits[el]; ok {
 			val = v
 		}
 		l.widget(el, val, false, st)
@@ -494,44 +522,45 @@ func (l *layouter) element(el dom.Element, st style) {
 		pinning = l.beginPin(cp)
 	}
 
-	switch tag {
-	case "h1":
-		st.scale, st.col, st.bold = 3, colBold, true
-	case "h2":
-		st.scale, st.col, st.bold = 2, colBold, true
-	case "h3":
-		st.scale, st.col, st.bold = 2, colBold, true
-	case "h4", "h5", "h6", "b", "strong", "th":
-		st.col, st.bold = colBold, true
-	case "a":
-		if href, ok := el.GetAttribute("href"); ok && href != "" {
-			st.href, st.col = href, colLink
+	// De cascade: UA-defaults ónder de author-props. Een h1 is niet
+	// speciaal — hij hééft alleen defaults (font-size: 32px), in dezelfde
+	// taal als de site-CSS. Daarna gaat álles door dezelfde ene
+	// toepassing van berekende waarden hieronder.
+	if ua, ok := uaProps[tag]; ok {
+		m := make(props, len(ua)+len(cp))
+		for k, v := range ua {
+			m[k] = v
 		}
-	case "code", "kbd", "samp":
-		st.col = colCode
-	case "pre":
-		st.pre, st.col = true, colCode
-	case "ul", "ol", "blockquote", "dd":
-		st.indent += inset
-	case "center":
-		st.center = true
-	case "mark":
-		st.bg, st.hasBG = namedColors["gold"], true
-	case "font": // oud web: <font color="...">
-		if v, ok := el.GetAttribute("color"); ok {
+		for k, v := range cp {
+			m[k] = v
+		}
+		cp = m
+	}
+	if tag == "a" {
+		// :link is niet in props uit te drukken: alleen een <a> mét href
+		// is een link (en krijgt de UA-linkkleur als de site niks zegt).
+		if href, ok := attr(el, "href"); ok && href != "" {
+			st.href = href
+			if _, ok := cp["color"]; !ok {
+				st.col = colLink
+			}
+		}
+	}
+	// Oud web: presentatie-attributen (géén CSS-pad).
+	if tag == "font" {
+		if v, ok := attr(el, "color"); ok {
 			if c, ok := cssColor(strings.ToLower(v)); ok {
 				st.col = c
 			}
 		}
 	}
-	// Ook oud web: bgcolor-attribuut (tabellen, body's van vroeger).
-	if v, ok := el.GetAttribute("bgcolor"); ok {
+	if v, ok := attr(el, "bgcolor"); ok {
 		if c, ok := cssColor(strings.ToLower(v)); ok {
 			st.bg, st.hasBG = c, true
 		}
 	}
 
-	// CSS over de tag-defaults heen (auteur wint van onze "UA-stylesheet").
+	// Dé toepassing van de berekende waarden — voor elk element dezelfde.
 	if v, ok := cp["color"]; ok {
 		if c, ok := cssColor(v); ok {
 			st.col = c
@@ -552,6 +581,9 @@ func (l *layouter) element(el dom.Element, st style) {
 	}
 	if v, ok := cp["text-align"]; ok {
 		st.center = v == "center"
+	}
+	if v, ok := cp["white-space"]; ok {
+		st.pre = v == "pre"
 	}
 
 	// Onthoud waar de tekst óp komt te liggen: het bg-vlak hieronder zet
@@ -585,12 +617,15 @@ func (l *layouter) element(el dom.Element, st style) {
 	switch cp["display"] {
 	case "flex", "inline-flex":
 		if fd := cp["flex-direction"]; fd == "column" || fd == "column-reverse" {
-			childBlockify = true
+			// Een kolom-flex herstélt de blok-context — ook midden in een
+			// flex-rij (figure in een teaser): zijn kinderen stapelen, en
+			// figcaption komt dus onder de foto, niet ernaast.
+			childBlockify, childInline = true, false
 		} else {
 			childInline = true
 		}
 	case "grid":
-		childBlockify = true
+		childBlockify, childInline = true, false
 	}
 	if tag == "nav" {
 		// UA-vooroordeel: een <nav> ís vrijwel altijd een menu — leg hem
@@ -615,15 +650,102 @@ func (l *layouter) element(el dom.Element, st style) {
 		}
 	}
 
+	// --- het boxmodel: marge, padding, breedte -----------------------------
+	// Containers zijn containers — button of div, het maakt niet uit: de
+	// CSS bepaalt de doos, wij rekenen hem uit.
+	mar := cssEdgesOf(cp, "margin", 96)
+	pd := cssEdgesOf(cp, "padding", 48)
+	topGap, botGap := blockMargin(tag, st.scale), blockMargin(tag, st.scale)
+	if mar.setV {
+		topGap, botGap = mar.t, mar.b
+	}
+	if isBlock {
+		st.indent += mar.l
+		st.rIndent += mar.r
+		// width/max-width: het blok smaller dan zijn ouder; margin:auto
+		// centreert (de klassieke artikel-kolom).
+		availW := l.width - 2*pad - st.indent - st.rIndent
+		if availW > 64 {
+			target := availW
+			if v, ok := cssLenPct(cp["width"], availW); ok && v >= 64 && v < target {
+				target = v
+			}
+			if v, ok := cssLenPct(cp["max-width"], availW); ok && v >= 64 && v < target {
+				target = v
+			}
+			if target < availW {
+				extra := availW - target
+				if mar.autoL && mar.autoR {
+					st.indent += extra / 2
+					st.rIndent += extra - extra/2
+				} else {
+					st.rIndent += extra
+				}
+			}
+		}
+	}
+
+	tile := l.imgs[cssURL(cp["background-image"])]
+	decorated := (isBlock || tag == "body") && (st.hasBG || tile != nil || hasBrd)
+	// Padding: bij een gedecoreerd blok kleurt hij mee (binnen het vlak);
+	// zonder decoratie is het gewoon lucht. Een kaart zonder expliciete
+	// padding krijgt de oude kaart-default, en de rand zelf telt ook mee.
+	if decorated && tag != "body" && !pd.setV && !pd.setH {
+		pd = edges{t: 4, r: 6, b: 4, l: 6, setV: true, setH: true}
+	}
+	if hasBrd {
+		pd.t, pd.r, pd.b, pd.l = pd.t+1, pd.r+1, pd.b+1, pd.l+1
+	}
+	if !decorated && isBlock {
+		topGap += pd.t
+		botGap += pd.b
+		st.indent += pd.l
+		st.rIndent += pd.r
+	}
+
+	// De knop-link: een inline(-block) element mét doos-eigenschappen
+	// (padding, marge, vlak of rand). Geen widget en geen uitzondering:
+	// de inhoud wordt inline gelegd en daarna vouwt de doos eromheen —
+	// tekst rendert nooit los van de div (of a, of span) waar hij in zit.
+	// Alleen bij échte decoratie (vlak of rand): kale padding op menu-
+	// links zou elke nav in dozen hakken.
+	inlineBox := !isBlock && tag != "body" && (st.hasBG || hasBrd)
+	ibIdx := -1
+	var ibX0, ibY0 int
+	if inlineBox {
+		l.flushGap()
+		if l.space && l.x > 0 {
+			l.x += charW(st.scale)
+		}
+		if l.x == 0 {
+			l.x = l.lineLeft(st.indent)
+		}
+		l.x += mar.l
+		ibIdx = len(l.boxes)
+		l.boxes = append(l.boxes, Box{BG: st.bg, HasBG: st.hasBG, Border: brdCol, HasBrd: hasBrd})
+		ibX0, ibY0 = l.x, l.y
+		l.x += pd.l
+		l.space = false
+		st.hasBG = false // de inhoud ligt al óp de doos
+	}
+
+	if isBlock {
+		l.blockGap(topGap)
+		l.depth++
+	}
+	// clear: onder de lopende floats beginnen (footer onder de foto).
+	if v := cp["clear"]; v == "both" || v == "left" || v == "right" {
+		l.clearFloats(-1)
+	}
+
 	// Blok-achtergrond en/of -rand: één vlak (of tegelpatroon) achter het
 	// hele blok — body-achtergrond wordt zo vanzelf de paginakleur. Het
 	// vlak gaat als placeholder de boxlijst in (paint-volgorde: onder de
-	// inhoud) en krijgt zijn rechthoek als de blokhoogte bekend is. Een
-	// gekaderd blok (kaart) krijgt binnenmarge, anders plakt de tekst aan
-	// de rand.
+	// inhoud) en krijgt zijn rechthoek als de blokhoogte bekend is.
 	bgIdx := -1
-	var bgY0, bgX0 int
-	if tile := l.imgs[cssURL(cp["background-image"])]; (isBlock || tag == "body") && (st.hasBG || tile != nil || hasBrd) {
+	var bgY0, bgX0, bgX1 int
+	var bgCover image.Image // background-size:cover → bij het sluiten beeldvullend schalen
+	if decorated {
 		l.breakLine()
 		l.flushGap()
 		bgIdx = len(l.boxes)
@@ -632,81 +754,488 @@ func (l *layouter) element(el dom.Element, st style) {
 			w, h := tile.Bounds().Dx(), tile.Bounds().Dy()
 			if w > 0 && h > 0 && w <= imgMaxDim && h <= imgMaxDim {
 				box.Tile = scaleTo(tile, w, h) // één RGBA-tegel, nooit een reuze-alloc
+				if cp["background-size"] == "cover" {
+					bgCover = tile
+				}
 			}
 		}
 		l.boxes = append(l.boxes, box)
 		bgY0 = l.y
 		bgX0 = pad + st.indent - 2
+		bgX1 = l.width - pad - st.rIndent + 2
 		if tag == "body" {
-			bgX0 = 0
+			bgX0, bgX1 = 0, l.width
 			if st.hasBG {
 				// De body-kleur is het paginacanvas: ook onder de content en
 				// in de marge — een donkere site is dan echt donker.
 				l.pageBG, l.hasPageBG = st.bg, true
 			}
 		} else {
-			l.y += 4 // binnenmarge boven
-			st.indent += 6
+			l.y += pd.t
+			st.indent += pd.l
+			st.rIndent += pd.r
 		}
 		st.hasBG = false // de kinderen liggen al óp het vlak: geen run-vulling meer nodig
+	}
+
+	// <button> is een container als elke andere — de site-CSS bepaalt de
+	// look; alleen het UA-default-knopvlak (als er niets gezet is) en het
+	// klikdoel zijn van ons.
+	fieldStart := -1
+	if tag == "button" {
+		l.space = true
+		fieldStart = len(l.boxes)
 	}
 
 	childSt := st
 	childSt.inline = childInline
 	childSt.blockify = childBlockify
 
-	// clear: onder de lopende floats beginnen (footer onder de foto).
-	if v := cp["clear"]; v == "both" || v == "left" || v == "right" {
-		l.clearFloats(-1)
-	}
-	if isBlock {
-		l.blockGap(blockMargin(tag, st.scale))
-		l.depth++
-	}
-	if tag == "li" && isBlock {
+	if tag == "li" && isBlock && !st.blockify {
+		// In een grid/flex-cel is een <li> een kaart, geen lijstitem.
 		l.word("-", st)
 		l.space = true
 	}
 	if inlined {
 		l.space = true
 	}
-	for c := el.FirstChild(); c != nil; c = c.NextSibling() {
-		l.walk(c, childSt)
+	// Kolommen: een flex-rij met blok-kinderen (foto naast kop), een grid
+	// met begrijpelijke tracks, of een tabel — elke cel een eigen
+	// sub-layout naast elkaar. Lukt dat niet (of is de rij uit balans),
+	// dan stapelen de cellen als blokken; zonder plan de gewone flow.
+	if rows, colW, gap := l.columnPlan(el, cp, st, tag); rows != nil {
+		for _, row := range rows {
+			if !l.columns(row, colW, gap, st) {
+				cst := childSt
+				cst.inline, cst.blockify = false, true
+				for _, cell := range row {
+					l.walk(cell, cst)
+				}
+			}
+		}
+	} else if cp["flex-direction"] == "column-reverse" {
+		// flex kent volgorde: -reverse stapelt van onder naar boven.
+		var kids []*html.Node
+		for c := el.FirstChild; c != nil; c = c.NextSibling {
+			kids = append(kids, c)
+		}
+		for i := len(kids) - 1; i >= 0; i-- {
+			l.walk(kids[i], childSt)
+		}
+	} else {
+		for c := el.FirstChild; c != nil; c = c.NextSibling {
+			l.walk(c, childSt)
+		}
 	}
 	if inlined {
 		l.space = true
+	}
+	if ibIdx >= 0 {
+		if len(l.boxes) == ibIdx+1 {
+			l.boxes = l.boxes[:ibIdx] // lege doos: weg ermee
+		} else {
+			r := l.boxes[ibIdx+1].R
+			for _, b := range l.boxes[ibIdx+2:] {
+				r = r.Union(b.R)
+			}
+			if pd.t > 0 {
+				// ruimte voor de padding-boven: de inhoud een stukje omlaag
+				for i := ibIdx + 1; i < len(l.boxes); i++ {
+					l.boxes[i].R = l.boxes[i].R.Add(image.Pt(0, pd.t))
+				}
+				r = r.Add(image.Pt(0, pd.t))
+			}
+			doos := image.Rect(ibX0, ibY0, r.Max.X+pd.r, r.Max.Y+pd.b)
+			l.boxes[ibIdx].R = doos
+			if l.x < doos.Max.X {
+				l.x = doos.Max.X
+			}
+			l.x += mar.r
+			if h := doos.Max.Y - l.y; h > l.lineH {
+				l.lineH = h
+			}
+			l.space = true
+		}
+	}
+	if fieldStart >= 0 && len(l.boxes) > fieldStart {
+		r := l.boxes[fieldStart].R
+		for _, b := range l.boxes[fieldStart+1:] {
+			r = r.Union(b.R)
+		}
+		l.fields = append(l.fields, Field{R: r.Inset(-2), Submit: true, node: el})
 	}
 	if isBlock {
 		l.depth--
 		// Impliciet clearen: floats die ín dit blok ontstonden eindigen
 		// hier — echte sites clearfixen hun kaarten toch.
 		l.clearFloats(l.depth)
-		l.blockGap(blockMargin(tag, st.scale))
+		l.blockGap(botGap)
 	}
 	if bgIdx >= 0 {
 		l.breakLine()
-		x1 := l.width - pad + 2
-		if tag == "body" {
-			x1 = l.width
+		if len(l.boxes) == bgIdx+1 && tag != "body" && l.boxes[bgIdx].Tile == nil {
+			// Er is niets ín het blok beland (een logo-div vol svg): geen
+			// vlak achterlaten — een lege gekleurde doos is alleen maar ruis.
+			l.boxes = l.boxes[:bgIdx]
+			l.y = bgY0
 		} else {
-			l.y += 4 // binnenmarge onder
+			if tag == "body" {
+				bgX1 = l.width
+			} else {
+				l.y += pd.b
+			}
+			// Verticaal exact de blokgrenzen: de binnenmarge zit er al in,
+			// en ±2 zou aangrenzende kaarten laten overlappen.
+			l.boxes[bgIdx].R = image.Rect(bgX0, bgY0, bgX1, l.y)
+			// cover: nu de vlakmaat bekend is beeldvullend schalen — één
+			// keer per layout, renderen blijft een kale draw (de tegel past
+			// dan precies één keer). Reuze-vlakken blijven tegels.
+			if w, h := bgX1-bgX0, l.y-bgY0; bgCover != nil && w >= 8 && h >= 8 && w <= 1600 && h <= 800 {
+				l.boxes[bgIdx].Tile = scaleCover(bgCover, w, h)
+			}
 		}
-		// Verticaal exact de blokgrenzen: de binnenmarge zit er al in, en
-		// ±2 zou aangrenzende kaarten laten overlappen.
-		l.boxes[bgIdx].R = image.Rect(bgX0, bgY0, x1, l.y)
 	}
 	if pinning {
 		l.endPin()
 	}
 }
 
+// elementChildren geeft de element-kinderen; direct-tekst telt apart.
+func elementChildren(el *html.Node) []*html.Node {
+	var out []*html.Node
+	for c := el.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type == html.ElementNode && !skip[c.Data] {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// renderableText: de tekst die wíj zouden tekenen — alles onder skip-
+// elementen (svg, script, style) telt niet mee (een <svg><title> is geen
+// zichtbare tekst).
+func renderableText(n *html.Node) string {
+	var b strings.Builder
+	var walk func(*html.Node)
+	walk = func(c *html.Node) {
+		if c.Type == html.ElementNode && skip[c.Data] {
+			return
+		}
+		if c.Type == html.TextNode {
+			b.WriteString(c.Data)
+		}
+		for k := c.FirstChild; k != nil; k = k.NextSibling {
+			walk(k)
+		}
+	}
+	walk(n)
+	return b.String()
+}
+
+// isRootHref: linkt dit naar de voorpagina ("/", of de site-root)?
+// Een kaal "#" (hamburger-triggers) is géén voorpagina-link.
+func isRootHref(href string) bool {
+	href = strings.TrimSpace(href)
+	if href == "" || href == "#" {
+		return false
+	}
+	u, err := url.Parse(href)
+	if err != nil {
+		return false
+	}
+	return (u.Path == "" || u.Path == "/") && u.RawQuery == "" && u.Fragment == ""
+}
+
+// hasDirectText: staat er échte tekst (geen witruimte) direct in dit
+// element? Dan is kolommen maken gevaarlijk — de tekst zou verdwijnen.
+func hasDirectText(el *html.Node) bool {
+	for c := el.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type == html.TextNode && strings.TrimSpace(c.Data) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// emptyContent: zit er niets renderbaars in — geen tekst (buiten svg/
+// script om), geen geladen afbeelding, geen formulier-widget?
+func (l *layouter) emptyContent(n *html.Node) bool {
+	if strings.TrimSpace(renderableText(n)) != "" {
+		return false
+	}
+	found := false
+	var w func(*html.Node)
+	w = func(c *html.Node) {
+		if found {
+			return
+		}
+		if c.Type == html.ElementNode {
+			switch c.Data {
+			case "img":
+				if src, _ := attr(c, "src"); l.imgs[src] != nil {
+					found = true
+					return
+				}
+			case "input", "textarea", "select":
+				found = true
+				return
+			}
+		}
+		for k := c.FirstChild; k != nil && !found; k = k.NextSibling {
+			w(k)
+		}
+	}
+	w(n)
+	return !found
+}
+
+// cellVisible: gaat deze flex-cel iets laten zien? Renderbare inhoud, of
+// een vulbaar logo-slot (voorpagina-link + site-icoon) — anders filtert de
+// cel weg vóórdat het slot gevuld kan worden.
+func (l *layouter) cellVisible(n *html.Node) bool {
+	if !l.emptyContent(n) {
+		return true
+	}
+	if l.icon == nil {
+		return false
+	}
+	found := false
+	var w func(*html.Node)
+	w = func(c *html.Node) {
+		if found {
+			return
+		}
+		if c.Type == html.ElementNode && c.Data == "a" {
+			if href, ok := attr(c, "href"); ok && isRootHref(href) {
+				found = true
+				return
+			}
+		}
+		for k := c.FirstChild; k != nil && !found; k = k.NextSibling {
+			w(k)
+		}
+	}
+	w(n)
+	return found
+}
+
+// columnPlan beslist of dit element als kolommen rendert en hoe breed die
+// worden: een tabel (rijen van td/th-cellen), een grid (tracks uit
+// grid-template-columns) of een flex-rij met blok-kinderen. nil = gewone
+// flow. Menu's (flex-rij vol linkjes) blijven bewust inline.
+func (l *layouter) columnPlan(el *html.Node, cp props, st style, tag string) ([][]*html.Node, []int, int) {
+	availW := l.lineRight(st.rIndent) - l.lineLeft(st.indent)
+	if availW < 320 {
+		return nil, nil, 0 // te smal om te verdelen: stapelen leest beter
+	}
+	gap := cssGap(cp)
+	equal := func(n int) []int {
+		w := (availW - gap*(n-1)) / n
+		if w < 100 {
+			return nil
+		}
+		colW := make([]int, n)
+		for i := range colW {
+			colW[i] = w
+		}
+		return colW
+	}
+	switch {
+	case tag == "table":
+		var rows [][]*html.Node
+		ncol := 0
+		var walkT func(n *html.Node)
+		walkT = func(n *html.Node) {
+			if n.Type == html.ElementNode && n.Data == "tr" {
+				var cells []*html.Node
+				for c := n.FirstChild; c != nil; c = c.NextSibling {
+					if c.Type == html.ElementNode && (c.Data == "td" || c.Data == "th") {
+						cells = append(cells, c)
+					}
+				}
+				if len(cells) > 0 {
+					rows = append(rows, cells)
+					if len(cells) > ncol {
+						ncol = len(cells)
+					}
+				}
+				return
+			}
+			for c := n.FirstChild; c != nil; c = c.NextSibling {
+				walkT(c)
+			}
+		}
+		walkT(el)
+		if len(rows) == 0 || ncol < 2 || ncol > 4 {
+			return nil, nil, 0 // één kolom of te veel: stapelen leest beter
+		}
+		if colW := equal(ncol); colW != nil {
+			return rows, colW, gap
+		}
+	case cp["display"] == "grid":
+		tracks := gridTracks(cp["grid-template-columns"], availW, gap)
+		items := elementChildren(el)
+		if tracks == nil || len(items) < 2 {
+			return nil, nil, 0
+		}
+		var rows [][]*html.Node
+		for i := 0; i < len(items); i += len(tracks) {
+			end := i + len(tracks)
+			if end > len(items) {
+				end = len(items)
+			}
+			rows = append(rows, items[i:end])
+		}
+		return rows, tracks, gap
+	case cp["display"] == "flex" || cp["display"] == "inline-flex":
+		fd := cp["flex-direction"]
+		if fd != "row" && fd != "row-reverse" && cp["flex-wrap"] == "" {
+			// Zonder expliciet rij-signaal (flex-direction: row of een
+			// flex-wrap) niet naast elkaar leggen: de default is weliswaar
+			// row, maar een gemiste declaratie is in de praktijk vaker
+			// "column" (kaarten) — en gestapeld leest altijd nog goed,
+			// terwijl onterechte kolommen de pagina slopen (tweakers'
+			// uitgelichte teasers: foto hoort bóven de tekst).
+			return nil, nil, 0
+		}
+		if hasDirectText(el) {
+			return nil, nil, 0
+		}
+		// Cellen zonder zichtbare inhoud (een svg-logo dat wij niet
+		// rasteren) doen niet mee — anders wordt zo'n cel een lege
+		// gekleurde doos en staat de rest scheef ernaast geperst.
+		var items []*html.Node
+		for _, it := range elementChildren(el) {
+			if l.cellVisible(it) {
+				items = append(items, it)
+			}
+		}
+		if fd == "row-reverse" {
+			for i, j := 0, len(items)-1; i < j; i, j = i+1, j-1 {
+				items[i], items[j] = items[j], items[i]
+			}
+		}
+		if len(items) < 2 {
+			return nil, nil, 0
+		}
+		blockish := false
+		for _, it := range items {
+			if blocks[it.Data] || it.Data == "img" || it.Data == "picture" || it.Data == "video" {
+				blockish = true
+			}
+		}
+		if !blockish {
+			return nil, nil, 0 // allemaal linkjes: dat is een menu
+		}
+		// Meer items dan er naast elkaar passen (of expliciet flex-wrap):
+		// wrappen in rijen van kaartmaat — dat ís flex-wrap.
+		if len(items) > 4 || cp["flex-wrap"] == "wrap" {
+			cols := availW / 220
+			if cols < 2 {
+				cols = 2
+			}
+			if cols > 4 {
+				cols = 4
+			}
+			if cols > len(items) {
+				cols = len(items)
+			}
+			colW := equal(cols)
+			if colW == nil {
+				return nil, nil, 0
+			}
+			var rows [][]*html.Node
+			for i := 0; i < len(items); i += cols {
+				end := i + cols
+				if end > len(items) {
+					end = len(items)
+				}
+				rows = append(rows, items[i:end])
+			}
+			return rows, colW, gap
+		}
+		if colW := equal(len(items)); colW != nil {
+			return [][]*html.Node{items}, colW, gap
+		}
+	}
+	return nil, nil, 0
+}
+
+// columns legt één rij cellen naast elkaar: elke cel zijn eigen
+// sub-layouter op kolombreedte, daarna verschoven naar zijn kolom-x. De
+// rij wordt zo hoog als de hoogste cel. Eerst wordt speculatief gelegd:
+// zijn de celhoogtes wild uit balans, dan is dit geen kaartenrij maar
+// pagina-steigerwerk (een titelblokje naast een eindeloze nieuwskolom) —
+// dan géén commit (false) en stapelt de aanroeper gewoon.
+func (l *layouter) columns(cells []*html.Node, colW []int, gap int, st style) bool {
+	subs := make([]*layouter, len(cells))
+	maxH, minH := 0, 1<<30
+	for i, cell := range cells {
+		w := colW[i%len(colW)]
+		sub := &layouter{width: w, imgs: l.imgs, styles: l.styles, edits: l.edits, icon: l.icon}
+		cst := st
+		cst.indent, cst.rIndent = 0, 0
+		cst.inline, cst.center, cst.pre = false, false, false
+		cst.blockify = true // een cel gedraagt zich als blok (ook een <a>)
+		sub.walk(cell, cst)
+		sub.breakLine()
+		subs[i] = sub
+		if sub.y > maxH {
+			maxH = sub.y
+		}
+		if sub.y < minH {
+			minH = sub.y
+		}
+	}
+	// Balans-check: kaartenrijen en teasers zijn (ruwweg) even hoog; een
+	// kolom die torenhoog boven de rest uitsteekt hoort niet naast maar
+	// boven/onder de rest. Kleine rijen zijn altijd goed.
+	if maxH > 700 && maxH > 3*minH {
+		return false
+	}
+	l.breakLine()
+	l.flushGap()
+	x0 := l.lineLeft(st.indent)
+	y0 := l.y
+	cx := x0
+	for i, sub := range subs {
+		off := image.Pt(cx-pad, y0) // sub begint op zijn eigen pad-marge
+		base := len(l.fields)
+		for _, b := range sub.boxes {
+			if b.Field > 0 {
+				b.Field += base
+			}
+			b.Pin = false
+			b.R = b.R.Add(off)
+			l.boxes = append(l.boxes, b)
+		}
+		for _, b := range sub.late {
+			if b.Field > 0 {
+				b.Field += base
+			}
+			b.Pin = false
+			b.R = b.R.Add(off)
+			l.late = append(l.late, b)
+		}
+		for _, f := range sub.fields {
+			f.R = f.R.Add(off)
+			l.fields = append(l.fields, f)
+		}
+		cx += colW[i%len(colW)] + gap
+	}
+	l.y = y0 + maxH
+	l.x, l.lineH, l.space = 0, 0, false
+	l.line0 = len(l.boxes)
+	return true
+}
+
 // input legt één <input> in de flow; hidden doet niet mee, knoppen en
 // tekstvelden worden widgets, checkbox/radio (v0) een kaal vinkje.
-func (l *layouter) input(el dom.Element, st style) {
-	typ, _ := el.GetAttribute("type")
+func (l *layouter) input(el *html.Node, st style) {
+	typ, _ := attr(el, "type")
 	typ = strings.ToLower(strings.TrimSpace(typ))
-	val, _ := el.GetAttribute("value")
-	if v, ok := l.edits[dom.Node(el)]; ok {
+	val, _ := attr(el, "value")
+	if v, ok := l.edits[el]; ok {
 		val = v
 	}
 	switch typ {
@@ -719,7 +1248,7 @@ func (l *layouter) input(el dom.Element, st style) {
 		l.widget(el, val, true, st)
 	case "checkbox", "radio":
 		mark := "[ ]"
-		if _, ok := el.GetAttribute("checked"); ok {
+		if _, ok := attr(el, "checked"); ok {
 			mark = "[x]"
 		}
 		l.word(mark, st) // tonen wel, togglen (nog) niet
@@ -732,18 +1261,18 @@ func (l *layouter) input(el dom.Element, st style) {
 // widget plaatst een invoerveld of knop als box in de flow en registreert
 // hem als Field (het klik/tik-doel). Veldbreedte volgt het size-attribuut
 // (default 20 tekens), knopbreedte het label.
-func (l *layouter) widget(el dom.Element, val string, submit bool, st style) {
+func (l *layouter) widget(el *html.Node, val string, submit bool, st style) {
 	l.flushGap()
 	chars := 20
 	if submit {
 		chars = len(val) + 2
-	} else if v, ok := el.GetAttribute("size"); ok {
+	} else if v, ok := attr(el, "size"); ok {
 		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 0 {
 			chars = n
 		}
 	}
 	w := chars*charW(st.scale) + 8
-	if max := l.lineRight() - l.lineLeft(st.indent); w > max {
+	if max := l.lineRight(st.rIndent) - l.lineLeft(st.indent); w > max {
 		w = max
 	}
 	h := charH(st.scale) + 8
@@ -751,7 +1280,7 @@ func (l *layouter) widget(el dom.Element, val string, submit bool, st style) {
 	if l.space && l.x > 0 {
 		sp = charW(st.scale)
 	}
-	if l.x > 0 && l.x+sp+w > l.lineRight() {
+	if l.x > 0 && l.x+sp+w > l.lineRight(st.rIndent) {
 		l.breakLine()
 		sp = 0
 	}
@@ -760,8 +1289,8 @@ func (l *layouter) widget(el dom.Element, val string, submit bool, st style) {
 	}
 	x := l.x + sp
 	r := image.Rect(x, l.y, x+w, l.y+h)
-	name, _ := el.GetAttribute("name")
-	l.fields = append(l.fields, Field{R: r, Name: name, Value: val, Submit: submit, node: dom.Node(el)})
+	name, _ := attr(el, "name")
+	l.fields = append(l.fields, Field{R: r, Name: name, Value: val, Submit: submit, node: el})
 	l.boxes = append(l.boxes, Box{R: r, Scale: st.scale, Field: len(l.fields)})
 	l.x = x + w
 	if h > l.lineH {
@@ -856,7 +1385,7 @@ func (l *layouter) word(w string, st style) {
 	if l.space && l.x > 0 {
 		sp = charW(st.scale)
 	}
-	if l.x > 0 && l.x+sp+ww > l.lineRight() {
+	if l.x > 0 && l.x+sp+ww > l.lineRight(st.rIndent) {
 		l.breakLine()
 		sp = 0
 	}
@@ -865,7 +1394,7 @@ func (l *layouter) word(w string, st style) {
 		// Past het woord op een verse regel niet naast de float (een kop
 		// op schaal 3 naast een foto), spring er dan onder — anders liep
 		// hij het beeld uit.
-		for l.x+ww > l.lineRight() {
+		for l.x+ww > l.lineRight(st.rIndent) {
 			bot := 0
 			if l.fL.w > 0 && l.y < l.fL.bot {
 				bot = l.fL.bot
@@ -911,7 +1440,7 @@ func (l *layouter) image(m image.Image, st style) {
 // met vaste CSS-maat, en geen zichtbare tekst (leeg, of weggeschoven met
 // text-indent/sr-only). Geeft de afbeelding en de maat; nil als dit gewoon
 // een blok-met-achtergrond is.
-func (l *layouter) bgReplacement(el dom.Element, cp props) (image.Image, int, int) {
+func (l *layouter) bgReplacement(el *html.Node, cp props) (image.Image, int, int) {
 	src := cssURL(cp["background-image"])
 	if src == "" || l.imgs[src] == nil {
 		return nil, 0, 0
@@ -921,7 +1450,7 @@ func (l *layouter) bgReplacement(el dom.Element, cp props) (image.Image, int, in
 	if !ok1 || !ok2 || w < 8 || h < 8 || w > l.width || h > 600 {
 		return nil, 0, 0
 	}
-	if cp[srProp] != "1" && strings.TrimSpace(el.TextContent()) != "" {
+	if cp[srProp] != "1" && strings.TrimSpace(textContent(el)) != "" {
 		return nil, 0, 0 // zichtbare tekst op een achtergrond: geen replacement
 	}
 	return l.imgs[src], w, h
@@ -934,7 +1463,7 @@ func (l *layouter) imageSized(m image.Image, w, h int, st style) {
 	if w < 1 || h < 1 {
 		return
 	}
-	maxW := l.lineRight() - l.lineLeft(st.indent)
+	maxW := l.lineRight(st.rIndent) - l.lineLeft(st.indent)
 	if maxW < 8 {
 		maxW = 8
 	}
@@ -949,7 +1478,7 @@ func (l *layouter) imageSized(m image.Image, w, h int, st style) {
 	if l.space && l.x > 0 {
 		sp = charW(st.scale)
 	}
-	if l.x > 0 && l.x+sp+w > l.lineRight() {
+	if l.x > 0 && l.x+sp+w > l.lineRight(st.rIndent) {
 		l.breakLine()
 		sp = 0
 	}
@@ -1029,6 +1558,111 @@ func (l *layouter) clearFloats(d int) {
 			l.y = bot
 		}
 	}
+}
+
+// fillAbs herkent de aspect-ratio-vulling: absolute op top:0;left:0 (in
+// een wrapper met padding-top-percentage, die wij op 0 klemmen). Dat is
+// geen overlay maar gewoon de inhoud — die hoort in de flow, anders
+// schuiven foto's over elkaar heen.
+func fillAbs(cp props) bool {
+	zero := func(k string) bool {
+		v, ok := cssLen(cp[k])
+		return cp[k] != "" && ok && v == 0
+	}
+	return zero("top") && zero("left")
+}
+
+// absolute haalt een element uit de flow: sub-layout op eigen breedte,
+// geplaatst op left/top/right t.o.v. de containing block (de dichtst-
+// bijzijnde gepositioneerde voorouder, anders de pagina) en ná de flow
+// geschilderd — badges, labels, overlays. Zonder coördinaten valt hij op
+// de "static position" (waar hij in de flow stond): voor dropdown-panelen
+// precies goed. bottom-verankering kan niet (de voorouderhoogte is hier
+// nog onbekend) — die valt op de static position terug.
+func (l *layouter) absolute(el *html.Node, cp props, st style) {
+	o := image.Pt(0, 0)
+	if n := len(l.origins); n > 0 {
+		o = l.origins[n-1]
+	}
+	x := l.lineLeft(st.indent)
+	if v, ok := cssLenSigned(cp["left"]); ok {
+		x = o.X + v
+	}
+	y := l.y
+	if v, ok := cssLenSigned(cp["top"]); ok {
+		y = o.Y + v
+	}
+	w := 0
+	if v, ok := cssLenPct(cp["width"], l.width-pad-x); ok {
+		w = v
+	}
+	if v, ok := cssLenSigned(cp["right"]); ok && cp["left"] == "" && w > 0 {
+		x = l.width - pad - v - w // rechts geankerd
+	}
+	if w <= 0 {
+		w = l.width - pad - x
+	}
+	if x < 0 {
+		x = 0
+	}
+	if y < 0 {
+		y = 0
+	}
+	if w < 24 || x >= l.width {
+		return // niets zinnigs te leggen
+	}
+	sub := &layouter{width: w, imgs: l.imgs, styles: l.styles, edits: l.edits, absEl: el, icon: l.icon}
+	cst := st
+	cst.indent, cst.rIndent = 0, 0
+	cst.inline, cst.center, cst.pre = false, false, false
+	cst.blockify = true
+	sub.walk(el, cst)
+	sub.breakLine()
+	off := image.Pt(x-pad, y)
+	base := len(l.fields)
+	for _, b := range append(sub.boxes, sub.late...) {
+		if b.Field > 0 {
+			b.Field += base
+		}
+		b.Pin = false
+		b.R = b.R.Add(off)
+		l.late = append(l.late, b)
+	}
+	for _, f := range sub.fields {
+		f.R = f.R.Add(off)
+		l.fields = append(l.fields, f)
+	}
+}
+
+// scaleCover schaalt src beeldvullend naar w×h (aspect behouden, gecentreerd,
+// de rest afgesneden) — background-size: cover, het hero/teaser-patroon.
+func scaleCover(src image.Image, w, h int) *image.RGBA {
+	sb := src.Bounds()
+	sw, sh := sb.Dx(), sb.Dy()
+	if sw < 1 || sh < 1 || w < 1 || h < 1 {
+		return image.NewRGBA(image.Rect(0, 0, 1, 1))
+	}
+	// De bron-crop die (op schaal) precies w×h dekt.
+	cw, ch := sw, sw*h/w
+	if ch > sh || ch < 1 {
+		ch = sh
+		cw = sh * w / h
+		if cw > sw {
+			cw = sw
+		}
+	}
+	if cw < 1 {
+		cw = 1
+	}
+	ox, oy := sb.Min.X+(sw-cw)/2, sb.Min.Y+(sh-ch)/2
+	dst := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		sy := oy + y*ch/h
+		for x := 0; x < w; x++ {
+			dst.Set(x, y, src.At(ox+x*cw/w, sy))
+		}
+	}
+	return dst
 }
 
 // scaleTo schaalt src naar w×h met nearest-neighbor: geen extra dependency,

@@ -83,13 +83,11 @@ func TestSrHidden(t *testing.T) {
 	if p[srProp] == "1" {
 		t.Fatalf("gewone maten ten onrechte sr-hidden: %+v", p)
 	}
-	// Het logo-patroon: maten reizen alleen mee mét een background-image.
+	// Maten zijn boxmodel-properties: ze reizen altijd mee (het logo-
+	// patroon léést ze, de blok-layout ook).
 	p = parseDecls("background-image:url(logo.png);width:120px;height:40px")
 	if p["width"] != "120px" || p["height"] != "40px" {
 		t.Fatalf("logo-maten niet meegereisd: %+v", p)
-	}
-	if p = parseDecls("width:120px;height:40px"); p["width"] != "" {
-		t.Fatalf("maten zonder background-image horen te vervallen: %+v", p)
 	}
 }
 

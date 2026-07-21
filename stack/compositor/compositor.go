@@ -157,6 +157,13 @@ type Compositor struct {
 	drag    *Surface    // window aan de muis (titelbalk-sleep)
 	dragOff image.Point // muis − win.Min bij het oppakken
 
+	// De resize-sleep (grip rechtsonder): tijdens het slepen beweegt alleen
+	// het kader (rszRect) — de app hertekent pas bij het loslaten, één keer.
+	// Op een framebuffer is dat het verschil tussen een strak kader en een
+	// stotterende storm van CONFIGURE's (Derek 21-07).
+	rsz     *Surface
+	rszRect image.Rectangle
+
 	onResize func(s *Surface, w, h int)
 	onClose  func(s *Surface) // rood stoplichtje: de eigenaar mag hem killen
 
@@ -457,6 +464,40 @@ func (c *Compositor) contentAtLocked(x, y int) (s *Surface, lx, ly int, ok bool)
 	return nil, 0, 0, false
 }
 
+// gripSize is het resize-hoekje rechtsonder (hit-vlak én de streepjes).
+const gripSize = 14
+
+// gripRectLocked is het resize-hoekje van s.
+func (c *Compositor) gripRectLocked(s *Surface) image.Rectangle {
+	return image.Rect(s.win.Max.X-gripSize, s.win.Max.Y-gripSize, s.win.Max.X, s.win.Max.Y)
+}
+
+// outlineDamageLocked maakt alleen de vier randstroken van r vuil — het
+// kader van een resize-sleep kost de kijker-stream zo bijna niets.
+func (c *Compositor) outlineDamageLocked(r image.Rectangle) {
+	c.addDamageLocked(image.Rect(r.Min.X, r.Min.Y, r.Max.X, r.Min.Y+2))
+	c.addDamageLocked(image.Rect(r.Min.X, r.Max.Y-2, r.Max.X, r.Max.Y))
+	c.addDamageLocked(image.Rect(r.Min.X, r.Min.Y, r.Min.X+2, r.Max.Y))
+	c.addDamageLocked(image.Rect(r.Max.X-2, r.Min.Y, r.Max.X, r.Max.Y))
+}
+
+// resizeDragLocked trekt het kader naar de muis: rechtsonder volgt, de
+// linkerbovenhoek staat vast, geklemd op een minimum en het werkvlak.
+func (c *Compositor) resizeDragLocked(x, y int) {
+	s := c.rsz
+	work := c.workLocked()
+	nx := clamp(x, s.win.Min.X+gripSize*4, work.Max.X)
+	ny := clamp(y, s.win.Min.Y+c.titleH+gripSize*2, work.Max.Y)
+	nr := image.Rect(s.win.Min.X, s.win.Min.Y, nx, ny)
+	if nr == c.rszRect {
+		return
+	}
+	c.outlineDamageLocked(c.rszRect)
+	c.rszRect = nr
+	c.outlineDamageLocked(nr)
+	c.dirty = true
+}
+
 // maxToggleLocked wisselt s tussen maximaal (het volle werkvlak) en zijn
 // oude plek. Geeft de nieuwe content-maat terug als die veranderde — de
 // aanroeper vuurt buiten de lock de OnResize-callback (CONFIGURE).
@@ -564,6 +605,11 @@ func (c *Compositor) PointerDown(x, y int) (s *Surface, lx, ly int, ok bool) {
 			c.dragOff = p.Sub(cur.win.Min)
 			return nil, 0, 0, false
 		}
+		if p.In(c.gripRectLocked(cur)) && !cur.menu {
+			c.rsz = cur // resize-sleep: alleen het kader beweegt, tot de Up
+			c.rszRect = cur.win
+			return nil, 0, 0, false
+		}
 		if p.In(cur.screen) {
 			return cur, x - cur.screen.Min.X, y - cur.screen.Min.Y, true
 		}
@@ -573,10 +619,15 @@ func (c *Compositor) PointerDown(x, y int) (s *Surface, lx, ly int, ok bool) {
 }
 
 // PointerMove verwerkt een muisbeweging: een lopende sleep verplaatst het
-// window, anders is het hover voor de app onder de aanwijzer.
+// window (of trekt het resize-kader), anders is het hover voor de app onder
+// de aanwijzer.
 func (c *Compositor) PointerMove(x, y int) (s *Surface, lx, ly int, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.rsz != nil {
+		c.resizeDragLocked(x, y)
+		return nil, 0, 0, false
+	}
 	if c.drag != nil {
 		c.moveDragLocked(x, y)
 		return nil, 0, 0, false
@@ -584,10 +635,35 @@ func (c *Compositor) PointerMove(x, y int) (s *Surface, lx, ly int, ok bool) {
 	return c.contentAtLocked(x, y)
 }
 
-// PointerUp beëindigt een sleep, of levert de button-up bij de app af.
+// PointerUp beëindigt een sleep — een resize-sleep past hier pas écht de
+// maat toe (één CONFIGURE, één herteken: de app sliep tijdens het slepen) —
+// of levert de button-up bij de app af.
 func (c *Compositor) PointerUp(x, y int) (s *Surface, lx, ly int, ok bool) {
+	var resizing *Surface
+	var rw, rh int
+	defer func() {
+		if resizing != nil && c.onResize != nil {
+			c.onResize(resizing, rw, rh)
+		}
+	}()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if sur := c.rsz; sur != nil {
+		c.resizeDragLocked(x, y)
+		c.addDamageLocked(dropRect(sur.win))
+		sur.win = c.rszRect
+		sur.screen = image.Rect(sur.win.Min.X+1, sur.win.Min.Y+c.titleH, sur.win.Max.X-1, sur.win.Max.Y-1)
+		sur.restore = image.Rectangle{} // een handmatige maat is niet "gemaximaliseerd"
+		c.addDamageLocked(dropRect(sur.win))
+		c.rsz, c.rszRect = nil, image.Rectangle{}
+		c.dirty = true
+		cw, ch := sur.screen.Dx(), sur.screen.Dy()
+		if ow, oh := sur.Size(); ow != cw || oh != ch {
+			sur.resize(cw, ch)
+			resizing, rw, rh = sur, cw, ch
+		}
+		return nil, 0, 0, false
+	}
 	if c.drag != nil {
 		c.moveDragLocked(x, y)
 		c.drag = nil
@@ -894,6 +970,23 @@ func (c *Compositor) redrawRegionLocked(clip image.Rectangle) {
 		}
 
 		pixel.OutlineNotched(sub, s.win, border)
+
+		// Het resize-hoekje: drie diagonale streepjes in de randkleur.
+		if !s.menu {
+			m := s.win.Max
+			for _, d := range [3]int{4, 8, 12} {
+				for k := 0; k <= d; k++ {
+					sub.SetRGBA(m.X-2-k, m.Y-2-(d-k), border)
+				}
+			}
+		}
+	}
+
+	// Het resize-kader (rubber band) ligt op alles behalve de taskbar: de
+	// enige beweging tijdens een resize-sleep — de app slaapt tot de Up.
+	if c.rsz != nil && !c.rszRect.Empty() && c.rszRect.Overlaps(clip) {
+		pixel.Outline(sub, c.rszRect, pixel.ColAccentL)
+		pixel.Outline(sub, c.rszRect.Inset(1), pixel.ColAccentD)
 	}
 
 	if bar := c.taskbarLocked(); bar.Overlaps(clip) {

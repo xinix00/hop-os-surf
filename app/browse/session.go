@@ -1,8 +1,9 @@
-// Session is de koppeling met gost-dom: één browservenster dat pagina's
-// ophaalt en parset. Scripting staat bewust uit (gost-dom kan Goja/V8
-// aanhaken, maar V8 is cgo en Goja een flinke dep — statische pagina's
-// eerst). gost-dom lost zelf relatieve hrefs en de history op; wij hoeven
-// alleen Navigate te roepen met wat de gebruiker aanklikt of intikt.
+// Session is het browservenster: pagina's ophalen, parsen en klaarzetten
+// voor de layout. De DOM is golang.org/x/net/html (de WHATWG-parser die
+// heel Go-land gebruikt), selectors matcht cascadia — allebei puur Go, dus
+// ook op tamago. Er zit bewust géén browserframework meer tussen: wij zijn
+// zelf de browser, en scripting bestaat hier niet (statische pagina's +
+// mechanisme-detectie, zie consentGateURL en de sr-hidden-regels).
 package browse
 
 import (
@@ -10,26 +11,24 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	_ "embed"
-	"errors"
+	"fmt"
 	"image"
-	"image/color"
 	_ "image/gif" // decoders voor <img>: puur Go, dus ook op tamago
 	_ "image/jpeg"
 	_ "image/png"
-
-	_ "golang.org/x/image/webp" // het halve nieuws-web serveert webp; ook puur Go
 	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
-	gost "github.com/gost-dom/browser"
-	"github.com/gost-dom/browser/dom"
-	"github.com/gost-dom/browser/html"
+	"github.com/andybalholm/cascadia"
+	"golang.org/x/net/html"
+	"golang.org/x/net/html/charset"
+
+	_ "golang.org/x/image/webp" // het halve nieuws-web serveert webp; ook puur Go
 )
 
 // welkomHTML is de startpagina (geen netwerk nodig): meteen beeld, en een
@@ -39,114 +38,63 @@ const welkomHTML = `<html><head><title>surf</title></head><body>
 <p>Typ een adres in de balk hierboven en druk op Enter.
 Scroll met het wiel, klik links om te volgen.</p>
 <hr>
-<p><b>gost-dom</b> parset de pagina's; deze layout-engine zet de DOM om in
-pixels op het 8x8-font. Geen CSS, geen scripts &mdash; wel <i>leesbaar</i>.</p>
+<p><b>x/net/html</b> parset de pagina's; deze layout-engine zet de DOM om in
+pixels. Geen scripts &mdash; wel CSS, en vooral: <i>leesbaar</i>.</p>
 <ul><li>blokken en woordwrap</li><li>koppen op schaal</li>
 <li>links: <a href="about:blank">klikbaar</a></li>
 <li><code>code</code> en <pre>  pre met  spaties</pre></li></ul>
 </body></html>`
 
+const userAgent = "surf/0.1 (HopOS)" // Wikipedia c.s. weigeren anonieme clients (403)
+
+// pageMaxBytes begrenst één HTML-document over de lijn — zelfde gedachte
+// als bij afbeeldingen en stylesheets: bare metal, begrensde heap.
+const pageMaxBytes = 8 << 20
+
 // Session is één browservenster.
 type Session struct {
-	b      *gost.Browser
-	win    html.Window
+	client *http.Client
+	doc    *html.Node
+	addr   *url.URL               // adres van de huidige pagina (na redirects)
+	base   *url.URL               // addr + <base href>: anker voor relatieve links
 	imgs   map[string]image.Image // gedecodeerde <img>'s van de huidige pagina, op raw src
-	styles map[dom.Node]props     // computed CSS-props per element (zie loadStyles)
-	edits  map[dom.Node]string    // ingetikte veldwaarden (overleven een re-layout)
-	nerr   *netErr                // laatste transportfout uit de netProxy (nil bij handler-tests)
-	site   *siteID                // identiteit van de huidige site (kopbalk); nil = geen
+	edits  map[*html.Node]string  // ingetikte veldwaarden (overleven een re-layout)
+	icon   image.Image            // apple-touch-icon: vult het logo-slot als de site zelf svg/JS is
+
+	// De cascade in twee stappen: matchen is duur en breedte-onafhankelijk
+	// (één keer per pagina, in de nav-goroutine), de media-evaluatie is
+	// goedkoop en gebeurt per layout-breedte — zo schakelt een resize
+	// tussen de mobiele en de desktop-versie van de site.
+	matched    []matchedRule
+	styleCache map[*html.Node]props
+	styleW     int
 }
 
-// siteID is wat een site herkenbaar maakt zónder dat wij zijn logo (SVG)
-// kunnen rasteren: het apple-touch-icon (PNG — het icoon dat op een
-// telefoon-homescreen komt), de naam (og:site_name of de host) en de
-// themakleur (<meta name="theme-color">, de kleur die mobiele browsers om
-// de pagina heen tekenen). Samen: het NU.nl-balkje-effect.
-type siteID struct {
-	icon  image.Image
-	name  string
-	theme color.RGBA
+// matchedRule is één gematchte CSS-regel: zijn declaraties, de elementen
+// die hij raakt en de media-condities waaronder hij geldt. De volgorde in
+// Session.matched ís de cascade-volgorde (specificiteit, dan bron).
+type matchedRule struct {
+	mq    []string
+	decls props
+	nodes []*html.Node
 }
 
-// NewSession start een venster op de ingebouwde startpagina. Het netwerk
-// gaat via netProxy: gost-dom's eigen fetch heeft géén timeout, en één dooie
-// site zou anders de hele event-lus voorgoed bevriezen ("hij staat vast",
-// Derek 19-07 — de browser hing op een niet-antwoordende host).
-func NewSession() *Session {
-	nerr := &netErr{}
-	s := newSession(gost.New(gost.WithHandler(netProxy{nerr}), gost.WithScriptEngine(nopEngine{})))
-	s.nerr = nerr
+// NewSession start een venster op de ingebouwde startpagina, met het echte
+// netwerk erachter (timeout + cookie-jar + CA-bundel, zie netClient).
+func NewSession() *Session { return newSession(netClient) }
+
+// NewSessionHandler is NewSession met een in-process http.Handler in plaats
+// van het echte netwerk — voor de host-tests, zonder poorten of sockets.
+func NewSessionHandler(h http.Handler) *Session {
+	return newSession(&http.Client{Transport: handlerTransport{h}, Jar: newJar(), Timeout: 20 * time.Second})
+}
+
+func newSession(c *http.Client) *Session {
+	s := &Session{client: c}
+	s.doc, _ = html.Parse(strings.NewReader(welkomHTML))
+	s.addr, _ = url.Parse("about:blank")
+	s.base = s.addr
 	return s
-}
-
-// netErr bewaart de laatste transportfout van de proxy. gost-dom vouwt elke
-// niet-200 plat tot "Non-ok Response" (Derek zag letterlijk dat en niets
-// meer) — hiermee komt de échte fout ("x509: …", "no such host", "HTTP
-// 404") in de statusbalk. De mutex omdat de proxy vanuit gost-dom's fetch
-// draait, het uitlezen vanuit Go/Follow.
-type netErr struct {
-	mu   sync.Mutex
-	last string
-}
-
-func (e *netErr) set(s string) {
-	e.mu.Lock()
-	e.last = s
-	e.mu.Unlock()
-}
-
-func (e *netErr) take() string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	s := e.last
-	e.last = ""
-	return s
-}
-
-// explain vervangt een kale gost-dom-fout door wat er op de lijn echt
-// misging, als de proxy dat weet.
-func (s *Session) explain(err error) error {
-	if err == nil {
-		if s.nerr != nil {
-			s.nerr.take() // opruimen: fouten van subresources niet later tonen
-		}
-		return nil
-	}
-	if s.nerr != nil {
-		if msg := s.nerr.take(); msg != "" {
-			return errors.New(msg)
-		}
-	}
-	return err
-}
-
-// nopEngine compileert elk script tot een no-op. Niet omdat we JS willen
-// draaien, maar omdat gost-dom v0.12 zónder engine panict op de eerste
-// pagina met een <script> (window.scriptContext is dan nil — daarom deed
-// google.nl het niet terwijl example.com het deed). Goja/V8 kan hier later
-// zo in.
-type nopEngine struct{}
-type nopHost struct{}
-type nopContext struct{}
-type nopScript struct{}
-
-func (nopEngine) NewHost(html.ScriptEngineOptions) html.ScriptHost { return nopHost{} }
-func (nopHost) NewContext(html.BrowsingContext) html.ScriptContext { return nopContext{} }
-func (nopHost) Close()                                             {}
-func (nopContext) Eval(string) (any, error)                        { return nil, nil }
-func (nopContext) Run(string) error                                { return nil }
-func (nopContext) Compile(string) (html.Script, error)             { return nopScript{}, nil }
-func (nopContext) DownloadScript(string) (html.Script, error)      { return nopScript{}, nil }
-func (nopContext) DownloadModule(string) (html.Script, error)      { return nopScript{}, nil }
-func (nopContext) Close()                                          {}
-func (nopScript) Eval() (any, error)                               { return nil, nil }
-func (nopScript) Run() error                                       { return nil }
-
-// netProxy is het "netwerk" voor gost-dom: een http.Handler die de request
-// écht uitvoert, met een harde timeout. Zo heeft de hele browser één plek
-// voor netbeleid (straks ook: alleen-origin voor gast-apps, §10-vergezicht).
-type netProxy struct {
-	nerr *netErr
 }
 
 // cacert.pem is Mozilla's root-CA-bundel (via https://curl.se/ca/cacert.pem,
@@ -154,7 +102,7 @@ type netProxy struct {
 // faalt élke HTTPS-handshake op het device met "x509: certificate signed by
 // unknown authority". Ververs hem af en toe met:
 //
-//	curl -fsSL https://curl.se/ca/cacert.pem -o browse/cacert.pem
+//	curl -fsSL https://curl.se/ca/cacert.pem -o app/browse/cacert.pem
 //
 //go:embed cacert.pem
 var cacertPEM []byte
@@ -162,7 +110,8 @@ var cacertPEM []byte
 // netClient met een cookie-jar: consent-muren (DPG's privacy-gate op
 // tweakers.net en nu.nl) zetten hun "akkoord"-cookie op een redirect — zonder
 // jar kom je eeuwig op de muur terug. Eén jar per proces: dit is een
-// éénpersoonsbrowser. cookiejar is pure Go, dus ook op tamago.
+// éénpersoonsbrowser. De timeout is het netbeleid: een dooie site mag de
+// nav-goroutine nooit eeuwig vasthouden.
 var netClient = &http.Client{Timeout: 20 * time.Second, Transport: netTransport(), Jar: newJar()}
 
 func newJar() http.CookieJar {
@@ -189,52 +138,40 @@ func netTransport() http.RoundTripper {
 	return t
 }
 
-func (p netProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// De inkomende (server-vormige) request omzetten naar een uitgaande.
-	out, err := http.NewRequest(r.Method, r.URL.String(), r.Body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	out.Header = r.Header.Clone()
-	// Cookies zijn van ónze jar (op netClient): wat gost-dom zelf meestuurt
-	// weg — twee administraties door elkaar geeft dubbele/verouderde cookies.
-	out.Header.Del("Cookie")
-	if out.Header.Get("User-Agent") == "" {
-		// Wikipedia c.s. weigeren anonieme clients (403); wees gewoon wie
-		// we zijn.
-		out.Header.Set("User-Agent", "surf/0.1 (HopOS; gost-dom)")
-	}
-	resp, err := netClient.Do(out)
-	if err != nil {
-		p.nerr.set(err.Error())
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		p.nerr.set("HTTP " + resp.Status + " " + r.URL.String())
-	}
-	for k, vs := range resp.Header {
-		for _, v := range vs {
-			w.Header().Add(k, v)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+// handlerTransport laat de client tegen een http.Handler praten in plaats
+// van het net — de tests draaien zo de hele keten (redirects, cookies,
+// subresources) zonder sockets. Bewust geen httptest: dit bestand linkt
+// mee in de app.
+type handlerTransport struct{ h http.Handler }
+
+func (t handlerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	rec := &recorder{hdr: http.Header{}, code: http.StatusOK}
+	t.h.ServeHTTP(rec, req)
+	return &http.Response{
+		Status:        fmt.Sprintf("%d %s", rec.code, http.StatusText(rec.code)),
+		StatusCode:    rec.code,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        rec.hdr,
+		Body:          io.NopCloser(bytes.NewReader(rec.buf.Bytes())),
+		ContentLength: int64(rec.buf.Len()),
+		Request:       req,
+	}, nil
 }
 
-// NewSessionHandler is NewSession met een in-process http.Handler in plaats
-// van het echte netwerk — voor de host-tests, zonder poorten of sockets.
-func NewSessionHandler(h http.Handler) *Session {
-	return newSession(gost.New(gost.WithHandler(h), gost.WithScriptEngine(nopEngine{})))
+// recorder is de minimale http.ResponseWriter voor handlerTransport.
+type recorder struct {
+	hdr  http.Header
+	code int
+	buf  bytes.Buffer
 }
 
-func newSession(b *gost.Browser) *Session {
-	s := &Session{b: b, win: b.NewWindow()}
-	s.win.LoadHTML(welkomHTML)
-	return s
-}
+func (r *recorder) Header() http.Header         { return r.hdr }
+func (r *recorder) WriteHeader(c int)           { r.code = c }
+func (r *recorder) Write(b []byte) (int, error) { return r.buf.Write(b) }
+
+// --- navigatie ---------------------------------------------------------------
 
 // Go navigeert naar een adresbalk-invoer; een kaal adres ("hop.local",
 // "10.0.0.7:8080/status") krijgt http:// ervoor. Bij een fout blijft de
@@ -249,97 +186,138 @@ func (s *Session) Go(addr string) error {
 	return s.navigate(addr)
 }
 
-// Follow navigeert naar een aangeklikte href, onaangeroerd: gost-dom lost
-// relatieve paden ("/x", "page2.html", "#anker") tegen de huidige pagina op.
+// Follow navigeert naar een aangeklikte href; relatieve paden ("/x",
+// "page2.html", "#anker") resolven tegen de huidige pagina (incl. <base>).
 func (s *Session) Follow(href string) error {
 	return s.navigate(href)
 }
 
-// navigate is de gedeelde landing van Go en Follow: navigeren, een eventuele
-// consent-muur één keer automatisch door, en dan de subresources laden.
-func (s *Session) navigate(addr string) error {
-	err := s.win.Navigate(addr)
-	if err == nil {
-		// Consent-muur (DPG's privacy-gate: tweakers.net, nu.nl, ...)?
-		// Zonder scripts is die pagina letterlijk leeg — de door-URL staat
-		// er wel gewoon in. De hop zet het consent-cookie (jar!); daarna
-		// opnieuw naar het échte adres, zodat de adresbalk en de base voor
-		// relatieve links kloppen. Eén keer, dus nooit een lus; faalt de
-		// hop, dan blijft de muur staan en zie je tenminste wáár je bent.
-		if gate := consentGateURL(s.win.Document()); gate != "" {
-			target := s.win.Location().Href()
-			if s.win.Navigate(gate) == nil {
-				s.win.Navigate(target)
-			}
-			if s.nerr != nil {
-				s.nerr.take() // fout in de hop: muur tonen, niet klagen
+// navigate is de gedeelde landing van Go en Follow: resolven, laden, een
+// eventuele consent-muur één keer door, en dan de subresources laden.
+func (s *Session) navigate(ref string) error {
+	u, err := s.resolve(ref)
+	if err != nil {
+		return err
+	}
+	// Alleen-een-anker: geen nieuwe pagina — laat de huidige staan.
+	if u.Fragment != "" && sameDoc(u, s.addr) {
+		return nil
+	}
+	doc, final, err := s.load(u)
+	if err != nil {
+		return err
+	}
+	// Consent-muur (DPG's privacy-gate: tweakers.net, nu.nl, ...)? Zonder
+	// scripts is die pagina letterlijk leeg — de door-URL staat er wel
+	// gewoon in. Die éne hop zet het consent-cookie (jar!); daarna opnieuw
+	// naar het gevraagde adres, zodat de adresbalk niet de redirect-junk
+	// (?referrer=...) toont. Faalt de hop, dan blijft de muur staan en zie
+	// je tenminste wáár je bent. Eén hop, dus nooit een lus.
+	if gate := consentGateURL(doc); gate != "" {
+		if gu, perr := url.Parse(gate); perr == nil {
+			if _, _, gerr := s.load(gu); gerr == nil {
+				if doc2, final2, err2 := s.load(u); err2 == nil {
+					doc, final = doc2, final2
+				}
 			}
 		}
-		s.edits = nil // nieuwe pagina, verse velden
-		s.loadStyles()
-		s.loadImages()
-		s.loadSiteID()
 	}
-	return s.explain(err)
+	// DPG's redirects plakken een ?referrer=... aan het adres (ook zónder
+	// gate, als het consent-cookie er al zit): analytics-junk, geen inhoud
+	// — niet in de balk en niet als base voor links.
+	if q := final.Query(); q.Has("referrer") {
+		q.Del("referrer")
+		clean := *final
+		clean.RawQuery = q.Encode()
+		final = &clean
+	}
+	s.doc, s.addr = doc, final
+	s.base = pageBase(doc, final)
+	s.edits = nil // nieuwe pagina, verse velden
+	s.loadStyles()
+	s.loadImages()
+	s.loadIcon()
+	return nil
 }
 
-// loadSiteID verzamelt icoon, naam en themakleur van de huidige pagina
-// (zie siteID). Draait in de nav-goroutine, net als de afbeeldingen.
-func (s *Session) loadSiteID() {
-	s.site = nil
-	base, err := url.Parse(s.win.Location().Href())
-	if err != nil || (base.Scheme != "http" && base.Scheme != "https") {
-		return
+// resolve maakt van een adres of href een absolute http(s)-URL.
+func (s *Session) resolve(ref string) (*url.URL, error) {
+	r, err := url.Parse(strings.TrimSpace(ref))
+	if err != nil {
+		return nil, err
 	}
-	id := &siteID{name: strings.TrimPrefix(base.Hostname(), "www."), theme: colBar}
-	iconHref := ""
-	var walk func(n dom.Node)
-	walk = func(n dom.Node) {
-		if el, ok := n.(dom.Element); ok {
-			switch strings.ToLower(el.TagName()) {
-			case "link":
-				rel, _ := el.GetAttribute("rel")
-				rel = strings.ToLower(rel)
-				href, _ := el.GetAttribute("href")
-				if href == "" {
-					break
-				}
-				if strings.Contains(rel, "apple-touch-icon") {
-					iconHref = href // het homescreen-icoon: altijd de beste
-				} else if iconHref == "" && strings.Contains(rel, "icon") &&
-					(strings.Contains(strings.ToLower(href), ".png") || isPNGType(el)) {
-					iconHref = href
-				}
-			case "meta":
-				name, _ := el.GetAttribute("name")
-				prop, _ := el.GetAttribute("property")
-				content, _ := el.GetAttribute("content")
-				switch {
-				case strings.EqualFold(name, "theme-color") && content != "":
-					if c, ok := cssColor(strings.ToLower(strings.TrimSpace(content))); ok {
-						id.theme = c
-					}
-				case strings.EqualFold(prop, "og:site_name") && strings.TrimSpace(content) != "":
-					id.name = strings.TrimSpace(content)
-				}
-			}
-		}
-		for c := n.FirstChild(); c != nil; c = c.NextSibling() {
-			walk(c)
-		}
+	if s.base != nil {
+		r = s.base.ResolveReference(r)
 	}
-	walk(s.win.Document())
-	if iconHref == "" {
-		iconHref = "/apple-touch-icon.png" // well-known pad: tweakers.net heeft geen link-tag, wél het icoon
+	if r.Scheme != "http" && r.Scheme != "https" {
+		return nil, fmt.Errorf("geen webadres: %s", ref)
 	}
-	id.icon = s.fetchImage(base, iconHref)
-	s.site = id
+	return r, nil
 }
 
-// isPNGType: heeft deze <link> een image/png-type?
-func isPNGType(el dom.Element) bool {
-	t, _ := el.GetAttribute("type")
-	return strings.EqualFold(strings.TrimSpace(t), "image/png")
+func sameDoc(a, b *url.URL) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	ac, bc := *a, *b
+	ac.Fragment, bc.Fragment = "", ""
+	return ac.String() == bc.String()
+}
+
+// load haalt één pagina op en parset hem; de fout is de échte fout van de
+// lijn ("no such host", "x509: …", "HTTP 404") — geen platgeslagen
+// tussenlaag meer. final is de URL ná redirects: dat is waar je bént.
+func (s *Session) load(u *url.URL) (doc *html.Node, final *url.URL, err error) {
+	req, err := http.NewRequest("GET", u.String(), nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, nil, fmt.Errorf("HTTP %s  %s", resp.Status, u)
+	}
+	body := io.LimitReader(resp.Body, pageMaxBytes)
+	r, err := charset.NewReader(body, resp.Header.Get("Content-Type"))
+	if err != nil {
+		r = body // onbekende charset: rauw parsen is beter dan niets
+	}
+	doc, err = html.Parse(r)
+	if err != nil {
+		return nil, nil, err
+	}
+	final = u
+	if resp.Request != nil && resp.Request.URL != nil {
+		final = resp.Request.URL
+	}
+	return doc, final, nil
+}
+
+// get haalt één subresource op (stylesheet, afbeelding, icoon).
+func (s *Session) get(u string) (*http.Response, error) {
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	return s.client.Do(req)
+}
+
+// pageBase: de basis voor relatieve links — de paginalocatie, tenzij een
+// <base href> anders zegt.
+func pageBase(doc *html.Node, final *url.URL) *url.URL {
+	if b := findEl(doc, "base"); b != nil {
+		if href, ok := attr(b, "href"); ok && strings.TrimSpace(href) != "" {
+			if r, err := url.Parse(strings.TrimSpace(href)); err == nil {
+				return final.ResolveReference(r)
+			}
+		}
+	}
+	return final
 }
 
 // consentGateURL herkent een consent-muur en geeft de "klik hier verder"-URL
@@ -347,16 +325,16 @@ func isPNGType(el dom.Element) bool {
 // NL-web): een <script> met decodeURIComponent('https%3A%2F%2F...') waarin
 // een privacy-bevestigings-URL met authId zit; die URL GET'en — met de
 // cookie-jar — telt als de minimale (functionele-cookies) doorklik.
-func consentGateURL(doc dom.Node) string {
+func consentGateURL(doc *html.Node) string {
 	const marker = "decodeURIComponent('"
 	found := ""
-	var walk func(n dom.Node)
-	walk = func(n dom.Node) {
+	var walk func(n *html.Node)
+	walk = func(n *html.Node) {
 		if found != "" {
 			return
 		}
-		if el, ok := n.(dom.Element); ok && strings.EqualFold(el.TagName(), "script") {
-			txt := el.TextContent()
+		if n.Type == html.ElementNode && n.Data == "script" {
+			txt := textContent(n)
 			for i := 0; ; {
 				j := strings.Index(txt[i:], marker)
 				if j < 0 {
@@ -376,7 +354,7 @@ func consentGateURL(doc dom.Node) string {
 				i = start + end
 			}
 		}
-		for c := n.FirstChild(); c != nil; c = c.NextSibling() {
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			walk(c)
 		}
 	}
@@ -395,7 +373,7 @@ func (s *Session) Type(f *Field, ch byte, bs bool) {
 		return
 	}
 	if s.edits == nil {
-		s.edits = map[dom.Node]string{}
+		s.edits = map[*html.Node]string{}
 	}
 	v, ok := s.edits[f.node]
 	if !ok {
@@ -424,17 +402,17 @@ func (s *Session) Submit(f *Field) error {
 	if form == nil {
 		return nil
 	}
-	if m, _ := form.GetAttribute("method"); strings.EqualFold(strings.TrimSpace(m), "post") {
-		return errors.New("POST-formulier: nog niet gedragen")
+	if m, _ := attr(form, "method"); strings.EqualFold(strings.TrimSpace(m), "post") {
+		return fmt.Errorf("POST-formulier: nog niet gedragen")
 	}
 	q := url.Values{}
-	var collect func(n dom.Node)
-	collect = func(n dom.Node) {
-		if el, ok := n.(dom.Element); ok && strings.EqualFold(el.TagName(), "input") {
-			name, _ := el.GetAttribute("name")
-			typ, _ := el.GetAttribute("type")
+	var collect func(n *html.Node)
+	collect = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "input" {
+			name, _ := attr(n, "name")
+			typ, _ := attr(n, "type")
 			typ = strings.ToLower(typ)
-			val, _ := el.GetAttribute("value")
+			val, _ := attr(n, "value")
 			if v, ok := s.edits[n]; ok {
 				val = v
 			}
@@ -445,21 +423,21 @@ func (s *Session) Submit(f *Field) error {
 					q.Set(name, val)
 				}
 			case typ == "checkbox" || typ == "radio":
-				if _, checked := el.GetAttribute("checked"); checked {
+				if _, checked := attr(n, "checked"); checked {
 					q.Set(name, val)
 				}
 			default: // text, search, hidden, ...
 				q.Set(name, val)
 			}
 		}
-		for c := n.FirstChild(); c != nil; c = c.NextSibling() {
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			collect(c)
 		}
 	}
-	for c := form.FirstChild(); c != nil; c = c.NextSibling() {
+	for c := form.FirstChild; c != nil; c = c.NextSibling {
 		collect(c)
 	}
-	action, _ := form.GetAttribute("action")
+	action, _ := attr(form, "action")
 	if action == "" {
 		action = s.URL()
 	}
@@ -470,69 +448,71 @@ func (s *Session) Submit(f *Field) error {
 }
 
 // ancestorForm zoekt het omvattende <form>-element.
-func ancestorForm(n dom.Node) dom.Element {
-	for p := n.ParentElement(); p != nil; p = p.ParentElement() {
-		if strings.EqualFold(p.TagName(), "form") {
+func ancestorForm(n *html.Node) *html.Node {
+	for p := n.Parent; p != nil; p = p.Parent {
+		if p.Type == html.ElementNode && p.Data == "form" {
 			return p
 		}
 	}
 	return nil
 }
 
-// Grenzen voor het CSS laden en matchen (zelfde gedachte als bij de
-// afbeeldingen: bare metal, begrensde heap en begrensde tijd).
+// --- CSS laden en matchen -----------------------------------------------------
+
+// Grenzen (zelfde gedachte als bij de afbeeldingen: bare metal, begrensde
+// heap en begrensde tijd).
 const (
 	cssMaxSheets = 12        // externe stylesheets per pagina (tweakers: 11, de header-regel zit in #8)
 	cssMaxBytes  = 256 << 10 // per sheet, over de lijn
-	cssMaxRules  = 4096      // na het wegfilteren van layout-junk en dode pseudo's
+	cssMaxRules  = 10240     // na filtering; media reist mee, dus mobiel+desktop samen — krap cappen kost juist de mobiele overrides
 	cssBudget    = 5 * time.Second
 )
 
 // loadStyles verzamelt de <style>-blokken en <link rel=stylesheet>-sheets,
-// parset ze tot regels en rekent per element de computed props uit: elke
-// regel één QuerySelectorAll (gost-doms selector-engine), toegepast in
-// (specificiteit, bronvolgorde) — later en specifieker wint. Draait in de
-// nav-goroutine; de layout doet daarna alleen nog map-lookups.
+// parset ze tot regels en matcht elke regel één keer met cascadia over de
+// boom, in cascade-volgorde (specificiteit, bron). Het resultaat is
+// Session.matched — breedte-onafhankelijk; stylesFor rekent daar per
+// framebreedte de computed props uit. Draait in de nav-goroutine.
 func (s *Session) loadStyles() {
-	s.styles = nil
-	doc := s.win.Document()
-	base, err := url.Parse(s.win.Location().Href())
-	if err != nil {
-		return
-	}
+	s.matched, s.styleCache, s.styleW = nil, nil, 0
 	var rules []cssRule
 	links := 0
-	// media=""-attribuut: zelfde evaluatie als @media — een print-sheet of
-	// desktop-only sheet doet op ons telefoonvenster niet mee.
-	mediaOK := func(el dom.Element) bool {
-		m, ok := el.GetAttribute("media")
+	// media=""-attribuut van de sheet: reist als conditie met de regels mee,
+	// net als een omhullend @media-blok.
+	sheetMQ := func(n *html.Node) ([]string, bool) {
+		m, ok := attr(n, "media")
 		if !ok || strings.TrimSpace(m) == "" {
-			return true
+			return nil, true
 		}
-		return mediaMatches(m, mobileWidth)
+		if !mediaAnyWidth(m) {
+			return nil, false // print e.d.: kan nooit gelden
+		}
+		return []string{m}, true
 	}
-	var walk func(n dom.Node)
-	walk = func(n dom.Node) {
-		if el, ok := n.(dom.Element); ok {
-			switch strings.ToLower(el.TagName()) {
+	var walk func(n *html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode {
+			switch n.Data {
 			case "style":
-				if mediaOK(el) {
-					rules = append(rules, parseCSS(n.TextContent(), len(rules))...)
+				if mq, ok := sheetMQ(n); ok {
+					rules = append(rules, parseCSSm(textContent(n), len(rules), mq)...)
 				}
 			case "link":
-				rel, _ := el.GetAttribute("rel")
-				href, _ := el.GetAttribute("href")
-				if strings.EqualFold(strings.TrimSpace(rel), "stylesheet") && href != "" && links < cssMaxSheets && mediaOK(el) {
-					links++
-					rules = append(rules, parseCSS(s.fetchText(base, href), len(rules))...)
+				rel, _ := attr(n, "rel")
+				href, _ := attr(n, "href")
+				if strings.EqualFold(strings.TrimSpace(rel), "stylesheet") && href != "" && links < cssMaxSheets {
+					if mq, ok := sheetMQ(n); ok {
+						links++
+						rules = append(rules, parseCSSm(s.fetchText(href), len(rules), mq)...)
+					}
 				}
 			}
 		}
-		for c := n.FirstChild(); c != nil; c = c.NextSibling() {
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			walk(c)
 		}
 	}
-	walk(doc)
+	walk(s.doc)
 	if len(rules) > cssMaxRules {
 		rules = rules[:cssMaxRules]
 	}
@@ -545,20 +525,38 @@ func (s *Session) loadStyles() {
 		}
 		return rules[i].seq < rules[j].seq
 	})
-	styles := map[dom.Node]props{}
-	vars := map[string]string{} // custom properties, doc-globaal (versimpeld: geen scoping)
 	deadline := time.Now().Add(cssBudget)
 	for _, r := range rules {
 		if time.Now().After(deadline) {
 			break // liever een half gestylede pagina dan een hangende browser
 		}
-		nodes, err := doc.QuerySelectorAll(r.sel)
-		if err != nil || nodes == nil {
-			continue // selector die gost-dom niet kent: regel vervalt
+		sel, err := cascadia.Parse(r.sel)
+		if err != nil {
+			continue // selector die cascadia niet kent: regel vervalt
 		}
-		matched := nodes.Length() > 0
-		for i := 0; i < nodes.Length(); i++ {
-			n := nodes.Item(i)
+		nodes := cascadia.QueryAll(s.doc, sel)
+		if len(nodes) == 0 {
+			continue
+		}
+		s.matched = append(s.matched, matchedRule{mq: r.mq, decls: r.decls, nodes: nodes})
+	}
+}
+
+// stylesFor rekent de computed props uit voor deze framebreedte: de
+// gematchte regels langs (cascade-volgorde), media-condities evalueren,
+// var()'s oplossen. Goedkoop genoeg om per resize te doen — zo IS een
+// breed venster de desktopsite. De laatste breedte is gecachet.
+func (s *Session) stylesFor(width int) map[*html.Node]props {
+	if s.styleCache != nil && s.styleW == width {
+		return s.styleCache
+	}
+	styles := map[*html.Node]props{}
+	vars := map[string]string{} // custom properties, doc-globaal (versimpeld: geen scoping)
+	for _, r := range s.matched {
+		if !ruleMediaOK(r.mq, width) {
+			continue
+		}
+		for _, n := range r.nodes {
 			p := styles[n]
 			if p == nil {
 				p = props{}
@@ -568,14 +566,12 @@ func (s *Session) loadStyles() {
 				p[k] = v
 			}
 		}
-		if matched {
-			// --vars van geraakte regels (:root, body, body.pg-x) gelden
-			// doc-globaal in cascade-volgorde — genoeg voor het gangbare
-			// "thema op de body"-patroon (gethop.org).
-			for k, v := range r.decls {
-				if strings.HasPrefix(k, "--") {
-					vars[k] = v
-				}
+		// --vars van geldende regels (:root, body, body.pg-x) gelden
+		// doc-globaal in cascade-volgorde — genoeg voor het gangbare
+		// "thema op de body"-patroon.
+		for k, v := range r.decls {
+			if strings.HasPrefix(k, "--") {
+				vars[k] = v
 			}
 		}
 	}
@@ -593,13 +589,13 @@ func (s *Session) loadStyles() {
 	// Kleuren op <html> gelden voor de pagina (html{background:...} is een
 	// gangbaar canvas-patroon), maar de layout wandelt vanaf body — schuif
 	// ze door naar body waar die ze zelf niet zet.
-	if root := doc.DocumentElement(); root != nil {
-		if hp := styles[dom.Node(root)]; hp != nil {
-			if body := doc.Body(); body != nil {
-				bp := styles[dom.Node(body)]
+	if root := findEl(s.doc, "html"); root != nil {
+		if hp := styles[root]; hp != nil {
+			if body := findEl(s.doc, "body"); body != nil {
+				bp := styles[body]
 				if bp == nil {
 					bp = props{}
-					styles[dom.Node(body)] = bp
+					styles[body] = bp
 				}
 				for _, k := range []string{"color", "background-color", "background-image"} {
 					if _, ok := bp[k]; !ok {
@@ -611,16 +607,17 @@ func (s *Session) loadStyles() {
 			}
 		}
 	}
-	s.styles = styles
+	s.styleCache, s.styleW = styles, width
+	return styles
 }
 
 // fetchText haalt één tekst-subresource (stylesheet) begrensd op; "" bij pech.
-func (s *Session) fetchText(base *url.URL, href string) string {
-	ref, err := url.Parse(href)
+func (s *Session) fetchText(href string) string {
+	u, err := s.resolve(href)
 	if err != nil {
 		return ""
 	}
-	resp, err := s.b.Client.Get(base.ResolveReference(ref).String())
+	resp, err := s.get(u.String())
 	if err != nil {
 		return ""
 	}
@@ -635,11 +632,13 @@ func (s *Session) fetchText(base *url.URL, href string) string {
 	return string(data)
 }
 
+// --- afbeeldingen -------------------------------------------------------------
+
 // Grenzen voor het afbeeldingen laden: dit draait straks op bare metal, en
 // een pagina vol foto's mag de heap niet opblazen. Boven de kaders → alt-
 // tekst, net als bij een laadfout.
 const (
-	imgMaxCount = 24      // per pagina
+	imgMaxCount = 32      // per pagina
 	imgMaxBytes = 4 << 20 // per afbeelding, over de lijn
 	imgMaxDim   = 2048    // px, per zijde (2048² RGBA = 16MB gedecodeerd)
 )
@@ -647,62 +646,62 @@ const (
 // loadImages haalt de <img src>'s van de huidige pagina op en decodeert ze,
 // gesleuteld op het rauwe src-attribuut (waar de layout ze op terugvindt).
 // Fouten zijn per afbeelding en stil: de layout valt terug op de alt-tekst.
-// Draait in de nav-goroutine, ná Navigate — de event-lus merkt er niets van.
+// Draait in de nav-goroutine — de event-lus merkt er niets van.
 func (s *Session) loadImages() {
 	s.imgs = nil
-	base, err := url.Parse(s.win.Location().Href())
-	if err != nil {
-		return
-	}
 	seen := map[string]bool{}
 	load := func(src string) {
 		if src == "" || seen[src] || len(seen) >= imgMaxCount {
 			return
 		}
 		seen[src] = true
-		if m := s.fetchImage(base, src); m != nil {
+		if m := s.fetchImage(src); m != nil {
 			if s.imgs == nil {
 				s.imgs = map[string]image.Image{}
 			}
 			s.imgs[src] = m
 		}
 	}
-	var walk func(n dom.Node)
-	walk = func(n dom.Node) {
-		if el, ok := n.(dom.Element); ok {
-			if strings.EqualFold(el.TagName(), "img") {
-				src, _ := el.GetAttribute("src")
+	var walk func(n *html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode {
+			if n.Data == "img" {
+				src, _ := attr(n, "src")
 				load(src)
 			}
-			// background-image uit de stylesheets of een inline style —
-			// de layout zoekt hem straks op dezelfde sleutel (de rauwe
-			// url uit de css) terug.
-			if v, ok := s.styles[dom.Node(el)]["background-image"]; ok {
-				load(cssURL(v))
-			}
-			if inline, ok := el.GetAttribute("style"); ok {
+			// background-image uit een inline style — de layout zoekt hem
+			// straks op dezelfde sleutel (de rauwe url) terug.
+			if inline, ok := attr(n, "style"); ok {
 				if v, ok := parseDecls(inline)["background-image"]; ok {
 					load(cssURL(v))
 				}
 			}
 		}
-		for c := n.FirstChild(); c != nil; c = c.NextSibling() {
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			walk(c)
 		}
 	}
-	if body := s.win.Document().Body(); body != nil {
+	if body := findEl(s.doc, "body"); body != nil {
 		walk(body)
+	}
+	// background-images uit de stylesheets: uit álle gematchte regels —
+	// niet alleen die van de mobiele breedte, anders mist de desktop-
+	// layout straks zijn achtergronden.
+	for _, r := range s.matched {
+		if v, ok := r.decls["background-image"]; ok {
+			load(cssURL(v))
+		}
 	}
 }
 
-// fetchImage haalt één afbeelding op (src opgelost tegen base) en decodeert
-// hem; nil bij elke vorm van pech of buiten de kaders.
-func (s *Session) fetchImage(base *url.URL, src string) image.Image {
-	ref, err := url.Parse(src)
+// fetchImage haalt één afbeelding op (src opgelost tegen de pagina) en
+// decodeert hem; nil bij elke vorm van pech of buiten de kaders.
+func (s *Session) fetchImage(src string) image.Image {
+	u, err := s.resolve(src)
 	if err != nil {
 		return nil
 	}
-	resp, err := s.b.Client.Get(base.ResolveReference(ref).String())
+	resp, err := s.get(u.String())
 	if err != nil {
 		return nil
 	}
@@ -728,15 +727,56 @@ func (s *Session) fetchImage(base *url.URL, src string) image.Image {
 	return m
 }
 
+// --- API voor main ------------------------------------------------------------
+
 // URL is het adres van de huidige pagina (voor de adresbalk na navigatie).
 func (s *Session) URL() string {
-	return s.win.Location().Href()
+	if s.addr == nil {
+		return ""
+	}
+	return s.addr.String()
 }
 
 // Layout layout de huidige pagina voor deze breedte, inclusief de bij de
 // navigatie opgehaalde afbeeldingen, CSS-props en ingetikte veldwaarden.
 func (s *Session) Layout(width int) Page {
-	return layoutStyled(s.win.Document().Body(), width, s.imgs, s.styles, s.edits, s.site)
+	return layoutStyled(findEl(s.doc, "body"), width, s.imgs, s.stylesFor(width), s.edits, s.icon)
+}
+
+// loadIcon haalt het site-icoon op (apple-touch-icon, of een png-icon, of
+// het well-known pad): de vulling voor het logo-slot — sites tekenen hun
+// logo met svg of een webcomponent, en dit icoon is hun eigen officiële
+// vervanger (het homescreen-plaatje).
+func (s *Session) loadIcon() {
+	s.icon = nil
+	if s.addr == nil || (s.addr.Scheme != "http" && s.addr.Scheme != "https") {
+		return
+	}
+	href := ""
+	var walk func(n *html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "link" {
+			rel, _ := attr(n, "rel")
+			rel = strings.ToLower(rel)
+			h, ok := attr(n, "href")
+			if ok && h != "" {
+				if strings.Contains(rel, "apple-touch-icon") {
+					href = h // het homescreen-icoon: altijd de beste
+				} else if href == "" && strings.Contains(rel, "icon") &&
+					strings.Contains(strings.ToLower(h), ".png") {
+					href = h
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(s.doc)
+	if href == "" {
+		href = "/apple-touch-icon.png" // well-known pad: tweakers heeft geen link-tag, wél het icoon
+	}
+	s.icon = s.fetchImage(href)
 }
 
 // hasScheme: "letters://" aan het begin. "host:7878" is géén scheme.

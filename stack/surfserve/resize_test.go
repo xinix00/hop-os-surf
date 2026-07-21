@@ -65,9 +65,12 @@ func TestResizeFlow(t *testing.T) {
 		t.Fatalf("hint hoort gehonoreerd: %dx%d, want 100x80", w, h)
 	}
 	fill(win1)
-	// De present wordt asynchroon door de sessie verwerkt: pollen.
+	// De present wordt asynchroon door de sessie verwerkt: pollen. Het
+	// resize-hoekje (drie diagonale streepjes chrome, 21-07) snoept een paar
+	// hoekpixels van de content — vandaar de kleine marge.
 	eventually(t, "hint-sized fill visible", func() bool {
-		return countColor(t, web.URL, red) == 100*80
+		n := countColor(t, web.URL, red)
+		return n >= 100*80-40 && n <= 100*80
 	})
 
 	// Window 2 erbij: win1 verandert NIET van maat (het hele punt).

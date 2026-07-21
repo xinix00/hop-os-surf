@@ -425,6 +425,67 @@ func TestStoplichten(t *testing.T) {
 	c.PointerUp(p.X, p.Y)
 }
 
+// TestResizeGrip: het hoekje rechtsonder — tijdens de sleep beweegt alleen
+// het kader (de app krijgt níks: geen resize, geen CONFIGURE), pas de Up
+// past de maat toe met precies één resize-melding. Klemt op een minimum;
+// menu's hebben geen grip.
+func TestResizeGrip(t *testing.T) {
+	c := New(320, 200)
+	var resizes [][3]any
+	c.OnResize(func(s *Surface, w, h int) { resizes = append(resizes, [3]any{s.Name, w, h}) })
+	s1 := c.Add("one", 100, 80, false)
+	menu := c.Add("menu", 100, 80, true)
+	c.Relayout()
+	resizes = nil
+
+	// Pak de grip en sleep 40px naar rechtsonder: nog niets verandert.
+	g := c.gripRectLocked(s1)
+	c.PointerDown(g.Min.X+2, g.Min.Y+2)
+	c.PointerMove(s1.win.Max.X+40, s1.win.Max.Y+30)
+	if w, h := s1.Size(); w != 100 || h != 80 {
+		t.Fatalf("tijdens de sleep hoort de maat te blijven staan: %dx%d", w, h)
+	}
+	if len(resizes) != 0 {
+		t.Fatalf("tijdens de sleep hoort er geen CONFIGURE te vuren: %v", resizes)
+	}
+	if c.rszRect.Dx() != s1.win.Dx()+40 || c.rszRect.Dy() != s1.win.Dy()+30 {
+		t.Fatalf("het kader hoort de muis te volgen: %v (win %v)", c.rszRect, s1.win)
+	}
+
+	// Loslaten: één resize, window en content op de nieuwe maat.
+	oldW := s1.win
+	c.PointerUp(oldW.Max.X+40, oldW.Max.Y+30)
+	if len(resizes) != 1 || resizes[0][0] != "one" {
+		t.Fatalf("de Up hoort precies één resize te melden: %v", resizes)
+	}
+	if s1.win.Dx() != oldW.Dx()+40 || s1.win.Dy() != oldW.Dy()+30 {
+		t.Fatalf("de Up hoort de maat toe te passen: %v", s1.win)
+	}
+	if w, h := s1.Size(); w != s1.screen.Dx() || h != s1.screen.Dy() {
+		t.Fatalf("content hoort de schermmaat te volgen: %dx%d vs %v", w, h, s1.screen)
+	}
+
+	// Kleiner dan het minimum kan niet: het kader klemt.
+	g = c.gripRectLocked(s1)
+	c.PointerDown(g.Min.X+2, g.Min.Y+2)
+	c.PointerMove(s1.win.Min.X+2, s1.win.Min.Y+2)
+	if c.rszRect.Dx() < gripSize*4 || c.rszRect.Dy() < c.titleH+gripSize*2 {
+		t.Fatalf("het kader hoort op een minimum te klemmen: %v", c.rszRect)
+	}
+	c.PointerUp(s1.win.Min.X+2, s1.win.Min.Y+2)
+
+	// Een menu heeft geen grip: dezelfde hoek is daar gewoon content/rand.
+	menu.minimized = false
+	c.raiseLocked(menu)
+	resizes = nil
+	mg := c.gripRectLocked(menu)
+	c.PointerDown(mg.Min.X+2, mg.Min.Y+2)
+	if c.rsz != nil {
+		t.Fatal("een menu hoort geen resize-grip te hebben")
+	}
+	c.PointerUp(mg.Min.X+2, mg.Min.Y+2)
+}
+
 // TestPartialComposeEquivalence: een reeks partiële composes — inclusief
 // raise, sleep en taskbar-geklik — eindigt in exact dezelfde pixels als één
 // volledige hertekening: de eigenschap die partieel componeren veilig maakt.
@@ -469,6 +530,21 @@ func TestPartialComposeEquivalence(t *testing.T) {
 	}
 	cut := image.Rect(s1.win.Min.X+6, s1.win.Min.Y+2, s1.win.Min.X+40, s1.win.Min.Y+6)
 	c.PresentRects(s2, []image.Rectangle{cut.Sub(s2.screen.Min)})
+	c.Compose()
+
+	// Herstel s2 en trek dan het resize-kader een paar stappen open (met
+	// composes middenin: de rubber band moet partieel-veilig zijn), Up.
+	lp = c.lightRectsLocked(s2)[0].Min.Add(image.Pt(3, 3))
+	c.PointerDown(lp.X, lp.Y)
+	c.PointerUp(lp.X, lp.Y)
+	c.Compose()
+	g := c.gripRectLocked(s2)
+	c.PointerDown(g.Min.X+2, g.Min.Y+2)
+	c.PointerMove(s2.win.Max.X+20, s2.win.Max.Y+10)
+	c.Compose()
+	c.PointerMove(s2.win.Max.X+35, s2.win.Max.Y+25)
+	c.Compose()
+	c.PointerUp(s2.win.Max.X+35, s2.win.Max.Y+25)
 	c.Compose()
 	incr, _ := c.Snapshot()
 

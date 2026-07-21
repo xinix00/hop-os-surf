@@ -1,7 +1,7 @@
 // CSS, het déél dat een simpele renderer kan laten zien: kleuren, vet,
-// verbergen, centreren, lettergrootte. De selector-kant bestond al —
-// gost-dom's QuerySelectorAll draait op een echte selector-parser — dus
-// hier woont alleen de declaratie-kant: een tolerante parser voor
+// verbergen, centreren, lettergrootte. De selector-kant is cascadia
+// (een echte selector-parser/matcher op *html.Node) — hier woont alleen
+// de declaratie-kant: een tolerante parser voor
 // "selector { prop: waarde }" die alles overslaat wat hij niet kent
 // (@media, animaties, flexbox — layout-CSS is bewust buiten scope: dat is
 // een layout-engine, en het 8x8-flow-model is juist de charme).
@@ -18,8 +18,9 @@ import (
 type props map[string]string
 
 // supportedProp: regels zonder één van deze properties worden al bij het
-// parsen weggegooid — het gros van echte stylesheets is layout-junk, en
-// elke overgebleven regel kost straks een QuerySelectorAll.
+// parsen weggegooid — het gros van echte stylesheets blijft junk (fonts,
+// animaties, schaduwen), en elke overgebleven regel kost een match-ronde.
+// Sinds de box-engine horen de boxmodel-properties er ook bij.
 func supportedProp(p string) bool {
 	if strings.HasPrefix(p, "--") {
 		return true // custom property: voer voor var()-resolutie
@@ -27,7 +28,11 @@ func supportedProp(p string) bool {
 	switch p {
 	case "display", "visibility", "color", "background-color", "background",
 		"background-image", "font-weight", "font-size", "text-align",
-		"border", "border-color", "flex-direction", "float", "clear":
+		"border", "border-color", "flex-direction", "float", "clear",
+		"margin", "margin-top", "margin-right", "margin-bottom", "margin-left",
+		"padding", "padding-top", "padding-right", "padding-bottom", "padding-left",
+		"width", "max-width", "height", "gap", "column-gap", "background-size",
+		"grid-template-columns", "flex-wrap", "white-space":
 		return true
 	}
 	return false
@@ -49,19 +54,26 @@ func cssBorder(v string) (color.RGBA, bool) {
 	return col, true
 }
 
-// cssRule is één selector met zijn declaraties, klaar om te matchen.
+// cssRule is één selector met zijn declaraties, klaar om te matchen. mq
+// zijn de omhullende @media-condities — die worden pas bij het cascaden
+// geëvalueerd, tegen de échte framebreedte (mobile óf desktop).
 type cssRule struct {
 	sel   string
 	spec  int // versimpelde specificiteit: id·100 + class/attr/pseudo·10 + tag
 	seq   int // bronvolgorde (tiebreaker: later wint)
 	decls props
+	mq    []string
 }
 
 // parseCSS vouwt een stylesheet uit tot regels. Tolerant: commentaar en
 // onbekende @-blokken (met hun hele inhoud) verdwijnen, kapotte regels ook.
 // Selector-groepen ("h1, h2") splitsen in losse regels met eigen
-// specificiteit — QuerySelectorAll krijgt ze één voor één.
-func parseCSS(src string, seq0 int) []cssRule {
+// specificiteit.
+func parseCSS(src string, seq0 int) []cssRule { return parseCSSm(src, seq0, nil) }
+
+// parseCSSm is parseCSS met omhullende media-condities (het media=""-
+// attribuut van de sheet, en verderop geneste @media-blokken).
+func parseCSSm(src string, seq0 int, mq []string) []cssRule {
 	src = stripComments(src)
 	var rules []cssRule
 	for i := 0; i < len(src); {
@@ -76,13 +88,15 @@ func parseCSS(src string, seq0 int) []cssRule {
 			continue
 		}
 		if sel[0] == '@' {
-			// @media: evalueren tegen onze (mobiele) viewport — mobile-first
-			// sites zetten de basisstijl buiten de query, maar desktop-first
-			// sites verstoppen juist hun móbiele stijl (menu dicht, header-
-			// kleur) in een max-width-blok. Matcht de query, dan doen de
-			// geneste regels gewoon mee. Andere @-blokken blijven genegeerd.
-			if strings.HasPrefix(sel, "@media") && mediaMatches(sel[len("@media"):], mobileWidth) {
-				rules = append(rules, parseCSS(body, seq0+len(rules))...)
+			// @media: de query reist mee met de geneste regels; welke tak
+			// geldt beslist de framebreedte bij het cascaden. Queries die
+			// op géén enkele breedte kunnen matchen (print, prefers-light)
+			// vallen hier al af. Andere @-blokken blijven genegeerd.
+			if strings.HasPrefix(sel, "@media") {
+				if q := sel[len("@media"):]; mediaAnyWidth(q) {
+					sub := append(append([]string{}, mq...), q)
+					rules = append(rules, parseCSSm(body, seq0+len(rules), sub)...)
+				}
 			}
 			continue
 		}
@@ -96,11 +110,35 @@ func parseCSS(src string, seq0 int) []cssRule {
 				continue
 			}
 			rules = append(rules, cssRule{
-				sel: one, spec: specificity(one), seq: seq0 + len(rules), decls: decls,
+				sel: one, spec: specificity(one), seq: seq0 + len(rules), decls: decls, mq: mq,
 			})
 		}
 	}
 	return rules
+}
+
+// mediaProbeWidths: de breedtes waarop we proeven of een query überhaupt
+// kán matchen — van telefoon tot breed scherm, plus onze default.
+var mediaProbeWidths = []int{320, mobileWidth, 640, 800, 1024, 1280, 1680}
+
+// mediaAnyWidth: kan deze query op énige redelijke framebreedte matchen?
+func mediaAnyWidth(q string) bool {
+	for _, w := range mediaProbeWidths {
+		if mediaMatches(q, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// ruleMediaOK: gelden alle omhullende media-condities op deze breedte?
+func ruleMediaOK(mq []string, w int) bool {
+	for _, q := range mq {
+		if !mediaMatches(q, w) {
+			return false
+		}
+	}
+	return true
 }
 
 // mobileWidth is de viewport waar @media-queries tegen geëvalueerd worden.
@@ -377,7 +415,7 @@ const srProp = "-surf-sr-hidden"
 // background-color als de waarde een kleur is (de gangbare shorthand).
 func parseDecls(s string) props {
 	var p props
-	var clip, clipPath, w, h, pos, top, left, bottom, ti, op string
+	var clip, clipPath, w, h, pos, top, left, right, bottom, ti, op string
 	for _, d := range strings.Split(s, ";") {
 		colon := strings.IndexByte(d, ':')
 		if colon < 0 {
@@ -403,8 +441,17 @@ func parseDecls(s string) props {
 			top = val
 		case "left":
 			left = val
+		case "right":
+			right = val
 		case "bottom":
 			bottom = val
+		case "inset":
+			// shorthand: 1-4 waarden in CSS-volgorde boven-rechts-onder-links
+			f := strings.Fields(val)
+			if len(f) >= 1 && len(f) <= 4 {
+				idx := map[int][4]int{1: {0, 0, 0, 0}, 2: {0, 1, 0, 1}, 3: {0, 1, 2, 1}, 4: {0, 1, 2, 3}}[len(f)]
+				top, right, bottom, left = f[idx[0]], f[idx[1]], f[idx[2]], f[idx[3]]
+			}
 		case "text-indent":
 			ti = val
 		case "opacity":
@@ -427,6 +474,12 @@ func parseDecls(s string) props {
 			if u := cssURL(val); u != "" {
 				p["background-image"] = "url(" + u + ")"
 			}
+			// "background: url(x) center/cover": de maat zit in de shorthand.
+			if strings.Contains(val, "cover") {
+				p["background-size"] = "cover"
+			} else if strings.Contains(val, "contain") {
+				p["background-size"] = "contain"
+			}
 			// var(--x) als hele waarde: bewaren; na var-resolutie wordt het
 			// alsnog een kleur (of valt het stil weg).
 			if strings.HasPrefix(val, "var(") {
@@ -442,35 +495,33 @@ func parseDecls(s string) props {
 		}
 		p[srProp] = "1"
 	}
-	// Het logo-patroon: een leeg element met background-image en een vaste
-	// maat ("image replacement"). De maten dragen we verder nergens — alleen
-	// mét een background-image reizen ze mee, zodat de layout er een echte
-	// afbeelding van kan maken en de regel-filter even streng blijft.
-	if p["background-image"] != "" {
-		if w != "" {
-			p["width"] = w
-		}
-		if h != "" {
-			p["height"] = h
-		}
-	}
-	// Het positionerings-kado: fixed/sticky vertelt ons wat chrome is —
-	// bovenin de header (pinnen bij het scrollen), onderin een cookiebar
-	// (weg). Alleen die twee waarden reizen mee (absolute/relative is
-	// binnen-layout: daar beginnen we niet aan), met hun top/bottom.
-	if pos == "fixed" || pos == "sticky" {
+	// Het positionerings-kado: fixed/sticky is chrome (header pinnen,
+	// cookiebar weg), absolute gaat uit de flow op zijn coördinaten,
+	// relative markeert de containing block. De offsets reizen mee.
+	switch pos {
+	case "fixed", "sticky", "absolute", "relative":
 		if p == nil {
 			p = props{}
 		}
 		p["position"] = pos
-		if top != "" {
-			p["top"] = top
-		}
-		if bottom != "" {
-			p["bottom"] = bottom
+		for k, v := range map[string]string{"top": top, "bottom": bottom, "left": left, "right": right} {
+			if v != "" {
+				p[k] = v
+			}
 		}
 	}
 	return p
+}
+
+// cssLenSigned: een lengte die ook negatief mag zijn (badge-offsets).
+func cssLenSigned(v string) (int, bool) {
+	if strings.HasPrefix(v, "-") {
+		if n, ok := cssLen(v[1:]); ok {
+			return -n, true
+		}
+		return 0, false
+	}
+	return cssLen(v)
 }
 
 // srHidden herkent visueel-verborgen in de losse declaraties: het 1x1px-
@@ -837,6 +888,250 @@ func fontScale(v string, cur int) int {
 	default:
 		return 1
 	}
+}
+
+// edges is één boxmodel-zijde-set (margin of padding) in pixels; autoL/R
+// staan voor "margin: 0 auto" — het klassieke centreer-signaal.
+type edges struct {
+	t, r, b, l   int
+	autoL, autoR bool
+	setV, setH   bool // verticaal/horizontaal expliciet gezet (anders: UA-default)
+}
+
+// capEdge klemt één zijde: negatieve marges en 100vh-achtige uitschieters
+// zijn layout-trucs die ons flow-model alleen maar slopen.
+func capEdge(v, max int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
+// cssEdgesOf leest margin of padding uit de props: de shorthand (1-4
+// waarden, CSS-volgorde boven-rechts-onder-links) plus de losse zijden
+// eroverheen. Procenten tellen als 0 (padding-top:56% is de aspect-ratio-
+// hack — die wil je echt niet als lege ruimte renderen).
+func cssEdgesOf(cp props, name string, maxPx int) edges {
+	e := edges{}
+	one := func(v string) (px int, auto, ok bool) {
+		v = strings.TrimSpace(v)
+		if v == "auto" {
+			return 0, true, true
+		}
+		if strings.HasSuffix(v, "%") {
+			return 0, false, true
+		}
+		if n, ok := cssLen(v); ok {
+			return capEdge(n, maxPx), false, true
+		}
+		return 0, false, false
+	}
+	if v, ok := cp[name]; ok {
+		f := strings.Fields(v)
+		get := func(i int) string { return f[i%len(f)] }
+		if len(f) >= 1 && len(f) <= 4 {
+			// CSS-expansie: 1→alle, 2→v h, 3→t h b, 4→t r b l.
+			idx := map[int][4]int{1: {0, 0, 0, 0}, 2: {0, 1, 0, 1}, 3: {0, 1, 2, 1}, 4: {0, 1, 2, 3}}[len(f)]
+			if t, _, ok := one(get(idx[0])); ok {
+				e.t, e.setV = t, true
+			}
+			if r, auto, ok := one(get(idx[1])); ok {
+				e.r, e.autoR, e.setH = r, auto, true
+			}
+			if b, _, ok := one(get(idx[2])); ok {
+				e.b, e.setV = b, true
+			}
+			if l, auto, ok := one(get(idx[3])); ok {
+				e.l, e.autoL, e.setH = l, auto, true
+			}
+		}
+	}
+	for side, dst := range map[string]*int{"-top": &e.t, "-right": &e.r, "-bottom": &e.b, "-left": &e.l} {
+		if v, ok := cp[name+side]; ok {
+			if px, auto, ok := one(v); ok {
+				*dst = px
+				switch side {
+				case "-top", "-bottom":
+					e.setV = true
+				case "-left":
+					e.autoL, e.setH = auto, true
+				case "-right":
+					e.autoR, e.setH = auto, true
+				}
+			}
+		}
+	}
+	return e
+}
+
+// cssLenPct: een lengte die ook een percentage (van avail) mag zijn.
+func cssLenPct(v string, avail int) (int, bool) {
+	v = strings.TrimSpace(v)
+	if strings.HasSuffix(v, "%") {
+		f, err := strconv.ParseFloat(strings.TrimSuffix(v, "%"), 64)
+		if err != nil {
+			return 0, false
+		}
+		return int(f / 100 * float64(avail)), true
+	}
+	return cssLen(v)
+}
+
+// cssGap: de flex/grid-gap in px (gap of column-gap), geklemd.
+func cssGap(cp props) int {
+	for _, k := range []string{"column-gap", "gap"} {
+		if v, ok := cp[k]; ok {
+			// "gap: 12px 8px" → de tweede is de kolom-gap.
+			f := strings.Fields(v)
+			if n, ok := cssLen(f[len(f)-1]); ok {
+				return capEdge(n, 32)
+			}
+		}
+	}
+	return 8
+}
+
+// gridTracks vertaalt grid-template-columns naar kolombreedtes voor deze
+// beschikbare breedte: px is vast, fr/auto/minmax is gewicht, repeat()
+// wordt uitgevouwen, repeat(auto-fill|auto-fit, minmax(Xpx, ...)) rekent
+// het aantal kolommen uit de breedte. nil = niet te begrijpen (of één
+// kolom): gewoon stapelen.
+func gridTracks(v string, avail, gap int) []int {
+	toks := gridTokens(v, avail, gap)
+	if len(toks) < 2 || len(toks) > 4 {
+		return nil // één kolom is stapelen; >4 op een smal venster is onzin
+	}
+	fixed, weight := 0, 0.0
+	for _, t := range toks {
+		if t.px > 0 {
+			fixed += t.px
+		} else {
+			weight += t.fr
+		}
+	}
+	free := avail - fixed - gap*(len(toks)-1)
+	if free < 0 {
+		return nil // vaste kolommen passen niet: stapelen
+	}
+	out := make([]int, len(toks))
+	for i, t := range toks {
+		if t.px > 0 {
+			out[i] = t.px
+		} else if weight > 0 {
+			out[i] = int(float64(free) * t.fr / weight)
+		}
+		if out[i] < 90 {
+			return nil // te smal om iets in te leggen
+		}
+	}
+	return out
+}
+
+type gridTok struct {
+	px int     // > 0: vaste breedte
+	fr float64 // anders: gewicht
+}
+
+func gridTokens(v string, avail, gap int) []gridTok {
+	var out []gridTok
+	v = strings.TrimSpace(v)
+	for v != "" {
+		v = strings.TrimSpace(v)
+		switch {
+		case strings.HasPrefix(v, "repeat("):
+			end := closeParen(v, len("repeat(")-1)
+			if end < 0 {
+				return nil
+			}
+			inner := v[len("repeat("):end]
+			v = v[end+1:]
+			c := strings.IndexByte(inner, ',')
+			if c < 0 {
+				return nil
+			}
+			count, rest := strings.TrimSpace(inner[:c]), strings.TrimSpace(inner[c+1:])
+			unit := gridTokens(rest, avail, gap)
+			if len(unit) == 0 {
+				return nil
+			}
+			n := 0
+			switch count {
+			case "auto-fill", "auto-fit":
+				// De responsive standaard: zoveel kolommen van minstens
+				// minmax-X als er passen.
+				min := unit[0].px
+				if min <= 0 {
+					return nil
+				}
+				n = (avail + gap) / (min + gap)
+				if n < 1 {
+					n = 1
+				}
+				// De kolommen mogen meegroeien: maak ze gewichten.
+				unit = []gridTok{{fr: 1}}
+			default:
+				m, err := strconv.Atoi(count)
+				if err != nil || m < 1 || m > 6 {
+					return nil
+				}
+				n = m
+			}
+			for i := 0; i < n; i++ {
+				out = append(out, unit...)
+			}
+		case strings.HasPrefix(v, "minmax("):
+			end := closeParen(v, len("minmax(")-1)
+			if end < 0 {
+				return nil
+			}
+			inner := v[len("minmax("):end]
+			v = v[end+1:]
+			// minmax(Xpx, 1fr): de min is interessant (voor auto-fill),
+			// verder is het gewoon een groeikolom.
+			if c := strings.IndexByte(inner, ','); c >= 0 {
+				if px, ok := cssLen(strings.TrimSpace(inner[:c])); ok {
+					out = append(out, gridTok{px: px, fr: 1})
+					continue
+				}
+			}
+			out = append(out, gridTok{fr: 1})
+		default:
+			// één los token tot de volgende spatie
+			sp := strings.IndexByte(v, ' ')
+			tok := v
+			if sp >= 0 {
+				tok, v = v[:sp], v[sp+1:]
+			} else {
+				v = ""
+			}
+			switch {
+			case strings.HasSuffix(tok, "fr"):
+				f, err := strconv.ParseFloat(strings.TrimSuffix(tok, "fr"), 64)
+				if err != nil || f <= 0 {
+					return nil
+				}
+				out = append(out, gridTok{fr: f})
+			case tok == "auto" || tok == "min-content" || tok == "max-content":
+				out = append(out, gridTok{fr: 1})
+			case strings.HasSuffix(tok, "%"):
+				if px, ok := cssLenPct(tok, avail); ok && px > 0 {
+					out = append(out, gridTok{px: px})
+				} else {
+					return nil
+				}
+			default:
+				if px, ok := cssLen(tok); ok && px > 0 {
+					out = append(out, gridTok{px: px})
+				} else {
+					return nil
+				}
+			}
+		}
+	}
+	return out
 }
 
 // boldWeight: is deze font-weight vet op een font zonder gewichten?
