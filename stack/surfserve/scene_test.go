@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/xinix00/hop-os-surf/stack/compositor"
+	"github.com/xinix00/hop-os-surf/stack/pixel"
 	"github.com/xinix00/hop-os-surf/stack/scene"
 	"github.com/xinix00/hop-os-surf/stack/surf"
 )
@@ -41,7 +42,9 @@ func TestSceneEndToEnd(t *testing.T) {
 
 	// De scene moet op het scherm komen (compose en zoek een accentpixel —
 	// de meter-vulling); eventually: de server verwerkt async.
-	deadline := time.Now().Add(2 * time.Second)
+	// Ruim: onder volle-suite-load (alles hercompileert + een draaiende
+	// desktop) haalde 2s het af en toe niet — de flake van 20-07.
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		comp.Compose()
 		img, _ := comp.Snapshot()
@@ -80,10 +83,11 @@ func TestSceneEndToEnd(t *testing.T) {
 
 // hasAccent zoekt de accentkleur (meter-vulling) in het beeld.
 func hasAccent(img *image.RGBA) bool {
+	want := pixel.ColAccent
 	for y := 0; y < img.Bounds().Dy(); y += 3 {
 		for x := 0; x < img.Bounds().Dx(); x += 3 {
 			c := img.RGBAAt(x, y)
-			if c.R == 0x3B && c.G == 0x82 && c.B == 0xF6 {
+			if c.R == want.R && c.G == want.G && c.B == want.B {
 				return true
 			}
 		}

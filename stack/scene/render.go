@@ -1,8 +1,8 @@
-// Render: de instrumentenpaneel-stijl van §5 — vlak, 1-px randen, harde
-// kleuren, geen schaduwen. Eén look-and-feel voor álle scene-apps: de stijl
-// wordt hier afgedwongen, apps kúnnen niet afwijken (dat is een feature).
-// Partiële hertekening gaat per widget-rect: PATCH #id → RenderNode(n) →
-// alleen dát rect als damage het net over.
+// Render: het "HOP Slate"-thema (stack/pixel/theme.go) voor álle scene-apps:
+// de stijl wordt hier afgedwongen, apps kúnnen niet afwijken (dat is een
+// feature). Verzonken vlakken voor lijsten en meters, kaartjes voor values,
+// knoppen met bevel en notch, Spleen-fonts. Partiële hertekening gaat per
+// widget-rect: PATCH #id → RenderNode(n) → alleen dát rect als damage.
 package scene
 
 import (
@@ -13,18 +13,17 @@ import (
 	"github.com/xinix00/hop-os-surf/stack/pixel"
 )
 
-// Het panel-palet (afgestemd op de compositor-chrome).
+// Panel-palet: aliassen op het thema, plus de scene-eigen tinten.
 var (
-	colBG      = color.RGBA{0x14, 0x1b, 0x2a, 0xFF} // venster-achtergrond
-	colText    = color.RGBA{0xDC, 0xE2, 0xF0, 0xFF}
-	colDim     = color.RGBA{0x8A, 0x94, 0xAA, 0xFF}
-	colHeading = color.RGBA{0xFF, 0xFF, 0xFF, 0xFF}
-	colMono    = color.RGBA{0x8C, 0xC8, 0xAA, 0xFF}
-	colAccent  = color.RGBA{0x3B, 0x82, 0xF6, 0xFF} // knoppen/vulling
-	colBtn     = color.RGBA{0x23, 0x2D, 0x46, 0xFF}
-	colBtnHov  = color.RGBA{0x32, 0x3E, 0x5F, 0xFF}
-	colEdge    = color.RGBA{0x3A, 0x46, 0x63, 0xFF}
-	colSel     = color.RGBA{0x2A, 0x4A, 0x7A, 0xFF} // list-selectie
+	colBG      = pixel.ColPanel
+	colText    = pixel.ColText
+	colDim     = pixel.ColDim
+	colHeading = pixel.ColText
+	colMono    = color.RGBA{0x8C, 0xC8, 0xAA, 0xFF} // monospaced groen
+	colAccent  = pixel.ColAccent
+	colEdge    = pixel.ColLineDim
+	colSel     = color.RGBA{0x1E, 0x3A, 0x66, 0xFF} // list-selectie
+	colZebra   = color.RGBA{0x0E, 0x15, 0x27, 0xFF} // om-en-om lijstrijen
 )
 
 // Render tekent de hele boom (achtergrond + alle widgets) in img.
@@ -56,34 +55,44 @@ func RenderNode(img *image.RGBA, n *Node) {
 
 	switch n.Kind {
 	case KindLabel:
-		col, scale := colText, 1
 		switch n.Style {
 		case StyleHeading:
-			col, scale = colHeading, 2
+			// Kop: accent-marker links + F16 — de "sectie begint hier"-anker.
+			f := pixel.F16
+			if r.Dy() < f.H {
+				f = pixel.F12
+			}
+			y := midY(r, f.H)
+			pixel.Fill(img, image.Rect(r.Min.X, y+1, r.Min.X+3, y+f.H-1), colAccent)
+			pixel.DrawText(img, r.Min.X+8, y, f, 1, colHeading, clipFace(n.Text, r.Dx()-8, f, 1))
 		case StyleMono:
-			col = colMono
+			pixel.DrawText(img, r.Min.X, midY(r, 12), pixel.F12, 1, colMono, clipFace(n.Text, r.Dx(), pixel.F12, 1))
+		default:
+			pixel.DrawText(img, r.Min.X, midY(r, 12), pixel.F12, 1, colText, clipFace(n.Text, r.Dx(), pixel.F12, 1))
 		}
-		pixel.DrawString(img, r.Min.X, midY(r, 8*scale), scale, col, clipText(n.Text, r.Dx(), scale))
 
 	case KindValue:
-		// Het live-cijfer: zo groot als het rect toelaat, eenheid klein erachter.
+		// Het live-cijfer als kaartje: verzonken vlak, groot getal, eenheid
+		// klein en gedimd erachter.
+		pixel.FillNotched(img, r, pixel.ColSunk)
+		pixel.OutlineNotched(img, r, colEdge)
 		s := n.Text
 		scale := fitScale(s, n.Unit, r)
-		w := pixel.StringWidth(s, scale)
-		x := r.Min.X + (r.Dx()-w-pixel.StringWidth(n.Unit, 1))/2
-		if x < r.Min.X {
-			x = r.Min.X
+		w := pixel.TextWidth(pixel.F16, scale, s)
+		x := r.Min.X + (r.Dx()-w-pixel.TextWidth(pixel.F12, 1, n.Unit))/2
+		if x < r.Min.X+3 {
+			x = r.Min.X + 3
 		}
-		y := midY(r, 8*scale)
-		pixel.DrawString(img, x, y, scale, colHeading, s)
+		y := midY(r, 16*scale)
+		pixel.DrawText(img, x, y, pixel.F16, scale, colHeading, s)
 		if n.Unit != "" {
-			pixel.DrawString(img, x+w+2, y+8*(scale-1), 1, colDim, n.Unit)
+			pixel.DrawText(img, x+w+3, y+16*scale-14, pixel.F12, 1, colDim, n.Unit)
 		}
 
 	case KindGauge, KindBar:
-		// Meter: 1-px rand, vulling naar rato; gauge krijgt schaalstrepen en
-		// de waarde als tekst erin — het verschil tussen "instrument" en
-		// "voortgang" zonder een tweede tekenpad.
+		// Meter: verzonken track, accent-vulling met een lichte bovenrand;
+		// gauge krijgt schaalstrepen en de waarde als tekst erin.
+		pixel.Fill(img, r, pixel.ColSunk)
 		pixel.Outline(img, r, colEdge)
 		lo, hi := n.Min, n.Max
 		if hi <= lo {
@@ -98,7 +107,11 @@ func RenderNode(img *image.RGBA, n *Node) {
 		}
 		inner := image.Rect(r.Min.X+1, r.Min.Y+1, r.Max.X-1, r.Max.Y-1)
 		fill := inner.Dx() * int(v-lo) / int(hi-lo)
-		pixel.Fill(img, image.Rect(inner.Min.X, inner.Min.Y, inner.Min.X+fill, inner.Max.Y), colAccent)
+		fr := image.Rect(inner.Min.X, inner.Min.Y, inner.Min.X+fill, inner.Max.Y)
+		pixel.Fill(img, fr, colAccent)
+		if fill > 2 && fr.Dy() > 3 {
+			pixel.Fill(img, image.Rect(fr.Min.X, fr.Min.Y, fr.Max.X, fr.Min.Y+1), pixel.ColAccentL)
+		}
 		if n.Kind == KindGauge {
 			for i := 1; i < 4; i++ { // schaalstrepen op 25/50/75%
 				x := inner.Min.X + inner.Dx()*i/4
@@ -106,22 +119,43 @@ func RenderNode(img *image.RGBA, n *Node) {
 				pixel.Fill(img, image.Rect(x, inner.Max.Y-4, x+1, inner.Max.Y), colDim)
 			}
 			txt := fmt.Sprintf("%d%s", n.Val, n.Unit)
-			pixel.DrawStringCentered(img, r, 1, colHeading, txt)
+			pixel.DrawTextCentered(img, r, pixel.F12, 1, colHeading, txt)
 		}
 
 	case KindButton:
-		bg := colBtn
-		if n.Pressed {
-			bg = colAccent
-		} else if n.Hover {
-			bg = colBtnHov
+		// Functionele kleurgroepen (StylePrimary/StyleDanger): een primaire
+		// actie is accent-gevuld, een destructieve toont rood — en ingedrukt
+		// is overal "vol + tekst een pixel omlaag".
+		fill, border, hovFill, hovBorder, downFill, tcol := pixel.ColRaise, pixel.ColLine,
+			pixel.ColRaiseHi, colAccent, pixel.ColAccentD, colHeading
+		switch n.Style {
+		case StylePrimary:
+			fill, border = pixel.ColAccentD, colAccent
+			hovFill, hovBorder = colAccent, pixel.ColAccentL
+			downFill = colAccent
+		case StyleDanger:
+			border, tcol = pixel.ColLineDim, pixel.ColErr
+			hovFill, hovBorder = pixel.ColRaiseHi, pixel.ColErr
+			downFill = pixel.ColErr
 		}
-		pixel.Fill(img, r, bg)
-		pixel.Outline(img, r, colEdge)
-		pixel.DrawStringCentered(img, r, 1, colHeading, n.Text)
+		txt := r
+		switch {
+		case n.Pressed:
+			pixel.FillNotched(img, r, downFill)
+			pixel.OutlineNotched(img, r, hovBorder)
+			txt, tcol = r.Add(image.Pt(0, 1)), colHeading
+		case n.Hover:
+			pixel.Card(img, r, hovFill, hovBorder)
+			if n.Style == StyleDanger {
+				tcol = colHeading
+			}
+		default:
+			pixel.Card(img, r, fill, border)
+		}
+		pixel.DrawTextCentered(img, txt, pixel.F12, 1, tcol, clipFace(n.Text, r.Dx()-6, pixel.F12, 1))
 
 	case KindList:
-		pixel.Outline(img, r, colEdge)
+		pixel.Fill(img, r, pixel.ColSunk)
 		rows := (r.Dy() - 2) / listRowH
 		for i := 0; i < rows; i++ {
 			idx := n.Scroll + i
@@ -130,19 +164,35 @@ func RenderNode(img *image.RGBA, n *Node) {
 			}
 			rowR := image.Rect(r.Min.X+1, r.Min.Y+1+i*listRowH, r.Max.X-1, r.Min.Y+1+(i+1)*listRowH)
 			col := colText
-			if int32(idx) == n.Sel {
+			switch {
+			case int32(idx) == n.Sel:
 				pixel.Fill(img, rowR, colSel)
+				pixel.Fill(img, image.Rect(rowR.Min.X, rowR.Min.Y, rowR.Min.X+2, rowR.Max.Y), colAccent)
 				col = colHeading
+			case idx%2 == 1:
+				pixel.Fill(img, rowR, colZebra) // zebra: leesbare regels
 			}
-			pixel.DrawString(img, rowR.Min.X+4, rowR.Min.Y+(listRowH-8)/2, 1, col,
-				clipText(n.Items[idx], rowR.Dx()-8, 1))
+			pixel.DrawText(img, rowR.Min.X+6, rowR.Min.Y+(listRowH-12)/2, pixel.F12, 1, col,
+				clipFace(n.Items[idx], rowR.Dx()-12, pixel.F12, 1))
 		}
+		// Scroll-indicator: een 3px-duim rechts, alleen bij overloop.
+		if total := len(n.Items); total > rows && rows > 0 {
+			track := image.Rect(r.Max.X-4, r.Min.Y+1, r.Max.X-1, r.Max.Y-1)
+			pixel.Fill(img, track, colZebra)
+			th := track.Dy() * rows / total
+			if th < 8 {
+				th = 8
+			}
+			ty := track.Min.Y + (track.Dy()-th)*n.Scroll/(total-rows)
+			pixel.Fill(img, image.Rect(track.Min.X, ty, track.Max.X, ty+th), pixel.ColLine)
+		}
+		pixel.Outline(img, r, colEdge)
 
 	case KindCanvas:
 		// v1-placeholder (open punt in het dossier): het DAMAGE-doorvoerpad
 		// komt zodra de eerste app hem nodig heeft. De rechthoek is er al.
 		pixel.Outline(img, r, colEdge)
-		pixel.DrawStringCentered(img, r, 1, colDim, "canvas")
+		pixel.DrawTextCentered(img, r, pixel.F12, 1, colDim, "canvas")
 
 	default:
 		// Onbekende widget (nieuwere app op oudere display, §4-versioning):
@@ -151,7 +201,7 @@ func RenderNode(img *image.RGBA, n *Node) {
 	}
 }
 
-// listRowH is de rijhoogte van een list (8px font + ademruimte).
+// listRowH is de rijhoogte van een list (12px font + ademruimte).
 const listRowH = 14
 
 func midY(r image.Rectangle, textH int) int {
@@ -162,25 +212,27 @@ func midY(r image.Rectangle, textH int) int {
 	return y
 }
 
-// fitScale kiest de grootste fontschaal waarop tekst+eenheid in het rect past.
+// fitScale kiest de grootste F16-schaal waarop tekst+eenheid in het rect past
+// (met de kaartje-marge van 3px).
 func fitScale(s, unit string, r image.Rectangle) int {
-	for scale := 4; scale > 1; scale-- {
-		if pixel.StringWidth(s, scale)+pixel.StringWidth(unit, 1)+2 <= r.Dx() && 8*scale <= r.Dy() {
+	for scale := 3; scale > 1; scale-- {
+		if pixel.TextWidth(pixel.F16, scale, s)+pixel.TextWidth(pixel.F12, 1, unit)+8 <= r.Dx() &&
+			16*scale+4 <= r.Dy() {
 			return scale
 		}
 	}
 	return 1
 }
 
-// clipText kapt tekst die niet in width past (geen wrap — dat is §4: canvas).
-func clipText(s string, width, scale int) string {
-	max := width / (8 * scale)
+// clipFace kapt tekst die niet in width past (geen wrap — dat is §4: canvas).
+func clipFace(s string, width int, f pixel.Face, scale int) string {
+	max := width / (f.W * scale)
 	if max < 0 {
 		max = 0
 	}
 	if len(s) > max {
 		if max > 1 {
-			return s[:max-1] + "." // 8x8-font is ASCII; een punt als ellipsis
+			return s[:max-1] + "." // bitmapfont is ASCII; een punt als ellipsis
 		}
 		return ""
 	}

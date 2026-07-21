@@ -62,6 +62,10 @@ func Canvas() *Node { return &Node{Kind: KindCanvas} }
 // Sized geeft de node een vaste maat (px) langs de as van zijn ouder.
 func (n *Node) Sized(px int) *Node { n.Size = uint16(px); return n }
 
+// Styled zet de widget-stijl (StylePrimary/StyleDanger op knoppen — de
+// functionele kleurgroepen; labels krijgen hun stijl al via Label()).
+func (n *Node) Styled(s uint8) *Node { n.Style = s; return n }
+
 // Weighted geeft de node een flex-gewicht in de restruimte.
 func (n *Node) Weighted(w int) *Node { n.Weight = uint8(w); return n }
 
@@ -86,11 +90,17 @@ type Conn struct {
 	// display achter de startknop hangt.
 	Role uint8
 
+	// OnClose (optioneel, zetten vóór Show) vuurt één keer wanneer de WM dit
+	// window sluit (het rode stoplichtje): de verbinding is dan definitief
+	// dood — sluiten is proces killen, de app hoort zichzelf op te ruimen.
+	OnClose func()
+
 	mu      sync.Mutex // conn + root + byID
 	conn    net.Conn
 	root    *Node
 	byID    map[uint16]*Node
 	started bool // lees- en pinglus draaien al (Show mag vaker: schermwissel)
+	dead    bool // Close geroepen: de lussen stoppen en helen nooit meer
 
 	sent atomic.Uint64 // PATCH/SCENE-bytes op de draad — het §8-meetpunt
 }
@@ -162,6 +172,10 @@ func (c *Conn) Show(root *Node) error {
 func (c *Conn) pingLoop() {
 	for range time.Tick(10 * time.Second) {
 		c.mu.Lock()
+		if c.dead {
+			c.mu.Unlock()
+			return
+		}
 		conn := c.conn
 		var err error
 		if conn != nil {
@@ -216,6 +230,21 @@ func (c *Conn) readLoop() {
 				break
 			}
 			buf = p
+			if h.Type == surf.TypeClose {
+				// De WM sloot ons window (het rode stoplichtje): definitief —
+				// niet helen, de app hoort te sterven.
+				c.mu.Lock()
+				c.dead = true
+				if c.conn != nil {
+					c.conn.Close()
+					c.conn = nil
+				}
+				c.mu.Unlock()
+				if c.OnClose != nil {
+					c.OnClose()
+				}
+				return
+			}
 			if h.Type == surf.TypeInput {
 				// Toetsen (de display stuurt alleen keys door; muis blijft
 				// display-side): rauw naar de app.
@@ -247,14 +276,27 @@ func (c *Conn) readLoop() {
 		}
 
 		// Zelfheling: redial tot het lukt, dan de actuele boom opnieuw tonen.
+		// Tenzij Close is geroepen — een host-proces (cmd/desktop) leeft na
+		// een app-stop gewoon door, en zonder deze vlag kwam het window na
+		// een seconde vrolijk terug uit de heel-lus.
 		c.mu.Lock()
 		if c.conn != nil {
 			c.conn.Close()
 			c.conn = nil
 		}
+		dead := c.dead
 		c.mu.Unlock()
+		if dead {
+			return
+		}
 		for {
 			time.Sleep(time.Second)
+			c.mu.Lock()
+			dead = c.dead
+			c.mu.Unlock()
+			if dead {
+				return
+			}
 			if err := c.connect(); err == nil {
 				c.logf("scene: reconnected to %s", c.addr)
 				break
@@ -331,11 +373,13 @@ func (c *Conn) BytesSent() uint64 { return c.sent.Load() }
 
 // Close neemt bewust afscheid: CLOSE naar de display (die ruimt het window
 // dan meteen op — zónder CLOSE parkeert hij het en wacht hij op ons) en de
-// verbinding dicht. Voor de OnExit-hook van applib.
+// verbinding dicht. Definitief: de lussen stoppen en helen nooit meer —
+// voor de OnExit-hook van applib én de stop-knop van een host-desktop.
 func (c *Conn) Close() {
 	c.mu.Lock()
 	conn := c.conn
-	c.conn = nil // de leeslus gaat helen, maar de app is toch weg
+	c.conn = nil
+	c.dead = true
 	c.mu.Unlock()
 	if conn != nil {
 		conn.SetWriteDeadline(time.Now().Add(time.Second))

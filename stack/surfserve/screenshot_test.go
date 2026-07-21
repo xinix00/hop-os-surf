@@ -1,7 +1,6 @@
 package surfserve
 
 import (
-	"image/color"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +14,7 @@ import (
 	"github.com/xinix00/hop-os-surf/app/launcher"
 	"github.com/xinix00/hop-os-surf/app/taskman"
 	"github.com/xinix00/hop-os-surf/stack/compositor"
+	"github.com/xinix00/hop-os-surf/stack/pixel"
 	"github.com/xinix00/hop-os-surf/stack/scene"
 	"github.com/xinix00/hop-os-surf/stack/surf"
 	"github.com/xinix00/hop-os-surf/stack/window"
@@ -47,7 +47,7 @@ func TestScreenshotDemo(t *testing.T) {
 	// startknop. Sequentieel geopend zodat de cascade-posities vaststaan;
 	// daarna slepen we ze via échte KVM-input naar hun plek — de demo bewijst
 	// zo ook de titelbalk-sleep en de taskbar.
-	colBtn := color.RGBA{0x23, 0x2D, 0x46, 0xFF} // scene-knoppen
+	colBtn := pixel.ColRaise // scene-knoppen (het thema-vlak van een knop)
 	drag := func(fromX, fromY, toX, toY int) {
 		srv.Input(surf.Input{Kind: surf.InputButton, Value: 1, X: uint16(fromX), Y: uint16(fromY)})
 		srv.Input(surf.Input{Kind: surf.InputMove, X: uint16(toX), Y: uint16(toY)})
@@ -65,7 +65,7 @@ func TestScreenshotDemo(t *testing.T) {
 		if err := clk.Present(); err != nil {
 			t.Fatal(err)
 		}
-		_, ok := findColor(t, web.URL, color.RGBA{0xFF, 0x6E, 0x50, 0xFF}) // secondewijzer
+		_, ok := findColor(t, web.URL, pixel.ColWarn) // secondewijzer (amber)
 		return ok
 	})
 

@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xinix00/hop-os-surf/stack/compositor"
@@ -70,6 +71,28 @@ func New(comp *compositor.Compositor, logf func(string, ...any)) *Server {
 	// De WM beslist de maat: elke Relayout-wijziging wordt een CONFIGURE
 	// naar de eigenaar van de surface (docs/gui-ontwerp.md §3).
 	comp.OnResize(s.configure)
+	// Het rode stoplichtje: CLOSE naar de app (die hoort te sterven — zijn
+	// Close is definitief) en de sessie hard dicht; cleanup ruimt het window
+	// meteen op omdat bye staat. Een wees (geparkeerd window zonder sessie)
+	// mag eindelijk gewoon weg.
+	comp.OnClose(func(sur *compositor.Surface) {
+		s.mu.Lock()
+		sess := s.sessions[sur]
+		s.mu.Unlock()
+		if sess == nil {
+			s.mu.Lock()
+			delete(s.orphans, sur)
+			s.mu.Unlock()
+			s.comp.Remove(sur)
+			s.comp.Relayout()
+			return
+		}
+		sess.bye.Store(true)
+		if id, ok := sess.idOf(sur); ok {
+			sess.send(surf.TypeClose, id, nil)
+		}
+		sess.conn.Close() // de leeslus keert terug; cleanup doet de rest
+	})
 	go s.reapOrphans()
 	return s
 }
@@ -178,7 +201,7 @@ type session struct {
 	// terugschieten". Input is lossy by design: vol = droppen, nooit killen.
 	inputQ chan inMsg
 	done   chan struct{} // gesloten in cleanup: de pomp stopt
-	bye    bool          // app zei CLOSE: écht weg (alleen gezet in de read-lus)
+	bye    atomic.Bool   // CLOSE gezien (van de app óf de WM): window écht weg
 
 	mu       sync.Mutex // surfaces/damage: read-lus, relayout-callbacks én input-routering
 	surfaces map[uint16]*compositor.Surface
@@ -321,7 +344,7 @@ func (s *Server) handle(conn net.Conn) {
 			// van een zelfhelende client, onze eigen deadline, een net-stall)
 			// kan een levende app zijn: parkeren (Dereks wet).
 			if isReset(err) {
-				sess.bye = true
+				sess.bye.Store(true)
 				s.logf("surf: %s: reset — app dood, window opruimen", sess.app)
 			} else {
 				s.logf("surf: %s disconnected (%v)", sess.app, err)
@@ -387,7 +410,7 @@ func (s *Server) handle(conn net.Conn) {
 		case surf.TypePatch:
 			s.handlePatch(sess, h.Surface, buf)
 		case surf.TypeClose:
-			sess.bye = true // bewust afscheid: window mag écht weg
+			sess.bye.Store(true) // bewust afscheid: window mag écht weg
 			return
 		default:
 			// Onbekende types negeren: nieuwere apps blijven werken op een
@@ -414,16 +437,17 @@ func (s *Server) unregister(sur *compositor.Surface) {
 // nam bewust afscheid) ruimt meteen op; anders wordt het window geparkeerd
 // en wacht het bevroren op de terugkeer van de app (adopt) of de grace.
 func (sess *session) cleanup() {
+	bye := sess.bye.Load()
 	all := sess.takeAll()
 	for _, sur := range all {
 		sess.srv.unregister(sur)
-		if sess.bye {
+		if bye {
 			sess.srv.comp.Remove(sur)
 		} else {
 			sess.srv.orphan(sur, sess.app)
 		}
 	}
-	if sess.bye && len(all) > 0 {
+	if bye && len(all) > 0 {
 		sess.srv.comp.Relayout() // de rest krijgt de vrijgekomen ruimte
 	}
 	close(sess.done) // de input-pomp stopt

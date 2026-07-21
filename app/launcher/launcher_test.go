@@ -69,44 +69,40 @@ func TestParseCatalog(t *testing.T) {
 	}
 }
 
-// TestToggle: klik op een draaiende app stopt hem, op een gestopte start hem;
-// één actie tegelijk, en de status maakt hem af.
-func TestToggle(t *testing.T) {
+// TestStart: een klik start — óók op een draaiende app (meerdere instanties
+// mogen; stoppen doe je met het rode stoplichtje). Eén start tegelijk, en de
+// eerstvolgende status maakt hem af.
+func TestStart(t *testing.T) {
 	m, _ := demo(t)
-	var started, stopped string
-	m.OnStart = func(a App) { started = a.Name }
-	m.OnStop = func(name string) { stopped = name }
+	var started []string
+	m.OnStart = func(a App) { started = append(started, a.Name) }
 
-	// clock draait (geplaatst): klik = stop
+	// clock draait al (geplaatst): klik = gewoon nóg een start
 	m.buttons[0].OnClick()
-	if stopped != "clock" || m.busy != "clock" || !m.busyStop {
-		t.Fatalf("klik op draaiende: stopped=%q busy=%q", stopped, m.busy)
+	if len(started) != 1 || started[0] != "clock" || m.busy != "clock" {
+		t.Fatalf("klik op draaiende hoort te starten: started=%v busy=%q", started, m.busy)
 	}
-	if !strings.HasPrefix(m.footer.Text, "stop clock") {
+	if !strings.HasPrefix(m.footer.Text, "start clock") {
 		t.Fatalf("voetregel: %q", m.footer.Text)
 	}
 	// tweede klik tijdens een lopende actie doet niets
 	m.buttons[1].OnClick()
-	if started != "" {
-		t.Fatal("één start/stop tegelijk")
+	if len(started) != 1 {
+		t.Fatal("één start tegelijk")
 	}
-	// de stop is klaar zodra de job verdwenen blijkt
-	m.SetData(hopapi.Status{ClusterName: "dev", Placed: map[string]int{"taskman": 1}})
+	// de eerstvolgende status klaart busy; twee instanties tonen een teller
+	m.SetData(hopapi.Status{ClusterName: "dev", Placed: map[string]int{"clock": 2, "taskman": 1}})
 	if m.busy != "" {
-		t.Fatalf("busy hoort geklaard na verdwijnen: %q", m.busy)
+		t.Fatalf("busy hoort geklaard na een verse status: %q", m.busy)
 	}
-	if m.buttons[0].Text != "clock" {
-		t.Fatalf("knoptekst na stop: %q", m.buttons[0].Text)
+	if m.buttons[0].Text != "* clock x2" {
+		t.Fatalf("knoptekst bij 2 instanties: %q", m.buttons[0].Text)
 	}
 
-	// en dezelfde knop is nu weer een start
-	m.buttons[0].OnClick()
-	if started != "clock" || m.busyStop {
-		t.Fatalf("klik op gestopte: started=%q", started)
-	}
-	m.SetData(hopapi.Status{ClusterName: "dev", Placed: map[string]int{"clock": 1, "taskman": 1}})
-	if m.busy != "" || m.buttons[0].Text != "* clock" {
-		t.Fatalf("na start: busy=%q knop=%q", m.busy, m.buttons[0].Text)
+	// en na het sluiten van beide windows is de knop weer kaal
+	m.SetData(hopapi.Status{ClusterName: "dev", Placed: map[string]int{"taskman": 1}})
+	if m.buttons[0].Text != "clock" {
+		t.Fatalf("knoptekst na sluiten: %q", m.buttons[0].Text)
 	}
 }
 

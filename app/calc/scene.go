@@ -16,10 +16,18 @@ func Tree(press func(key byte)) (root, display *scene.Node) {
 		for c := 0; c < 4; c++ {
 			k := grid[r][c] // kopie: de closure hoort bij déze knop
 			btns[c] = scene.Button(label(k), func() { press(k) })
+			// Functionele kleuren zoals elke rekenmachine: de operator-kolom
+			// accent, C rood — cijfers blijven rustig.
+			switch {
+			case c == 3:
+				btns[c].Styled(scene.StylePrimary)
+			case k == 'C':
+				btns[c].Styled(scene.StyleDanger)
+			}
 		}
 		kids = append(kids, scene.Row(2, btns...))
 	}
-	kids = append(kids, scene.Button("=", func() { press('=') }))
+	kids = append(kids, scene.Button("=", func() { press('=') }).Styled(scene.StylePrimary))
 	root = scene.Col(4, kids...)
 	return root, display
 }

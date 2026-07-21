@@ -278,7 +278,7 @@ p { color: navy; } /* zelfde specificiteit, later wint */
 </body></html>`))
 	})
 	mux.HandleFunc("/extra.css", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`.extern { color: teal; font-size: 24px; }`))
+		w.Write([]byte(`.extern { color: teal; font-size: 32px; }`))
 	})
 
 	s := NewSessionHandler(mux)
@@ -305,7 +305,7 @@ p { color: navy; } /* zelfde specificiteit, later wint */
 		t.Fatalf("inline style hoort te winnen, <b> hoort vet te blijven: %+v", b)
 	}
 	if b := find(p, "uit-extern-blad"); b == nil || b.Col != (color.RGBA{0x00, 0x80, 0x80, 0xFF}) || b.Scale != 3 {
-		t.Fatalf("extern stylesheet (teal, 24px→schaal 3) niet toegepast: %+v", b)
+		t.Fatalf("extern stylesheet (teal, 32px→schaal 3) niet toegepast: %+v", b)
 	}
 	kop := find(p, "Kop")
 	if kop == nil || kop.R.Min.X <= pad+8 {
@@ -322,7 +322,7 @@ ul.inl li { display: inline; }
 </style></head><body>
 <nav><a href="/a">Home</a><a href="/b">Docs</a><a href="/c">Over</a></nav>
 <div class="menu"><div>Een</div><div>Twee</div><div>Drie</div></div>
-<ul class="inl"><li>x</li><li>y</li></ul>
+<ul class="inl"><li>xxi</li><li>ypsilon</li></ul>
 <p>gewone alinea eronder</p>
 </body></html>`))
 	})
@@ -350,8 +350,8 @@ ul.inl li { display: inline; }
 	}
 	sameLine("Home", "Docs") // <nav>: UA-vooroordeel
 	sameLine("Docs", "Over")
-	sameLine("Een", "Twee") // display:flex
-	sameLine("x", "y")      // li display:inline (en zonder streepjes)
+	sameLine("Een", "Twee")    // display:flex
+	sameLine("xxi", "ypsilon") // li display:inline (en zonder streepjes)
 	if find(p, "-") != nil {
 		t.Fatal("inline li hoort geen '-'-bullet te krijgen")
 	}
@@ -525,11 +525,16 @@ func TestGridKaarten(t *testing.T) {
 
 func TestParseCSS(t *testing.T) {
 	rules := parseCSS(`a { color: red; margin: 4px } /* junk */ b,i{font-weight:700}
-@media screen { .x { color: blue } } .leeg { margin: 0 }`, 0)
-	// a (color), b en i (font-weight); .leeg (alleen margin) en de
-	// @media-inhoud vallen weg.
-	if len(rules) != 3 {
-		t.Fatalf("wil 3 regels, kreeg %d: %+v", len(rules), rules)
+@media screen { .x { color: blue } } .leeg { margin: 0 }
+@media (min-width: 900px) { .desktop { color: green } }`, 0)
+	// a (color), b en i (font-weight), .x (@media screen matcht: wij zijn
+	// een scherm); .leeg (alleen margin) en het min-width-blok (desktop,
+	// wij zijn 480) vallen weg.
+	if len(rules) != 4 {
+		t.Fatalf("wil 4 regels, kreeg %d: %+v", len(rules), rules)
+	}
+	if rules[3].sel != ".x" || rules[3].decls["color"] != "blue" {
+		t.Fatalf(".x uit @media screen mist: %+v", rules[3])
 	}
 	if rules[0].decls["color"] != "red" || rules[0].decls["margin"] != "" {
 		t.Fatalf("a-regel klopt niet: %+v", rules[0])
@@ -601,7 +606,10 @@ func TestAscii(t *testing.T) {
 		{"em—dash", "em-dash"},
 		{"‘quo’", "'quo'"},
 		{"…", "..."},
-		{"smörgås", "sm?rg?s"}, // één ? per teken, niet per byte
+		{"smörgås", "smorgas"},   // accenten vouwen naar de kale letter
+		{"Oekraïne", "Oekraine"}, // de krant moet leesbaar zijn
+		{"€ 299", "EUR 299"},
+		{"日本", "??"}, // buiten de tabel: één ? per teken, niet per byte
 	}
 	for _, c := range cases {
 		if got := ascii(c.in); got != c.want {

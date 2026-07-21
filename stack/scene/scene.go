@@ -88,11 +88,15 @@ const (
 	tStrList = 4
 )
 
-// Label-stijlen (PropStyle).
+// Widget-stijlen (PropStyle). Labels: normal/heading/mono. Knoppen:
+// normal/primary/danger — de functionele kleurgroepen (calc: operatoren
+// accent, C rood; zie render.go). Eén veld, de display kiest de kleuren.
 const (
 	StyleNormal  = 0
 	StyleHeading = 1
 	StyleMono    = 2
+	StylePrimary = 3
+	StyleDanger  = 4
 )
 
 // EVENT-kinds (disp→app).

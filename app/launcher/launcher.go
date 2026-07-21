@@ -69,24 +69,24 @@ type Conn interface {
 }
 
 // Menu is de launcher: de catalogus als knoppen, met de clusterstatus als
-// waarheid over wat er draait. Publieke methoden zijn goroutine-veilig.
+// waarheid over wat er draait. Een klik start — altijd (meerdere van
+// hetzelfde mag, Derek 21-07); stoppen doe je met het rode stoplichtje van
+// het window zelf. Publieke methoden zijn goroutine-veilig.
 type Menu struct {
 	// Hooks naar buiten; zetten vóór Start. Aangeroepen mét de interne lock
 	// vast — niet terugroepen in het Menu (stuur een kanaal aan).
-	OnStart func(app App)     // POST deze spec
-	OnStop  func(name string) // DELETE deze job
-	Refresh func()            // vraag een verse status
+	OnStart func(app App) // POST deze spec
+	Refresh func()        // vraag een verse status
 
 	mu   sync.Mutex
 	conn Conn
 	apps []App
 
-	status   hopapi.Status
-	err      string
-	fetched  time.Time
-	busy     string // job waar een start/stop voor loopt ("" = geen)
-	busyStop bool   // richting van busy: true = stop gevraagd
-	now      func() time.Time
+	status  hopapi.Status
+	err     string
+	fetched time.Time
+	busy    string // app waar een start voor loopt ("" = geen)
+	now     func() time.Time
 
 	buttons []*scene.Node
 	footer  *scene.Node
@@ -146,32 +146,24 @@ func (m *Menu) Start() error {
 // click togglet app i: draait hij (geplaatst), dan stop; anders start.
 func (m *Menu) click(i int) {
 	if m.busy != "" || i < 0 || i >= len(m.apps) {
-		return // één start/stop tegelijk
+		return // één start tegelijk
 	}
 	a := m.apps[i]
-	m.busy, m.busyStop = a.Name, m.status.Placed[a.Name] > 0
-	if m.busyStop {
-		if m.OnStop != nil {
-			m.OnStop(a.Name)
-		}
-	} else if m.OnStart != nil {
+	m.busy = a.Name
+	if m.OnStart != nil {
 		m.OnStart(a)
 	}
 	m.patch()
 }
 
-// SetData neemt een verse clusterstatus over; een lopende start/stop is
-// klaar zodra de status de nieuwe werkelijkheid toont.
+// SetData neemt een verse clusterstatus over; de eerstvolgende status na een
+// start is de nieuwe werkelijkheid (de worker fetcht direct na de actie) —
+// de knop is dan weer vrij.
 func (m *Menu) SetData(st hopapi.Status) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.status, m.err, m.fetched = st, "", m.now()
-	if m.busy != "" {
-		placed := st.Placed[m.busy] > 0
-		if placed != m.busyStop {
-			m.busy = ""
-		}
-	}
+	m.busy = ""
 	m.patch()
 }
 
@@ -215,23 +207,24 @@ func (m *Menu) patch() {
 	switch {
 	case m.err != "":
 		s = "FOUT: " + m.err
-	case m.busy != "" && m.busyStop:
-		s = "stop " + m.busy + " ..."
 	case m.busy != "":
 		s = "start " + m.busy + " ..."
 	case m.fetched.IsZero():
 		s = "verbinden ..."
 	default:
-		s = "bijgewerkt " + ui.Ago(m.now().Sub(m.fetched)) + " geleden  --  klik: start/stop  r: ververs"
+		s = "bijgewerkt " + ui.Ago(m.now().Sub(m.fetched)) + " geleden  --  klik: start  r: ververs"
 	}
 	m.conn.SetText(m.footer, s)
 }
 
-// buttonText is het knoplabel: draaiend krijgt een ster, bezig een "...".
+// buttonText is het knoplabel: draaiend krijgt een ster (met aantal bij
+// meerdere instanties), bezig een "...".
 func (m *Menu) buttonText(a App) string {
 	switch {
 	case m.busy == a.Name:
 		return a.Name + " ..."
+	case m.status.Placed[a.Name] > 1:
+		return fmt.Sprintf("* %s x%d", a.Name, m.status.Placed[a.Name])
 	case m.status.Placed[a.Name] > 0:
 		return "* " + a.Name
 	default:

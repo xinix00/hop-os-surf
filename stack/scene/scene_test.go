@@ -286,5 +286,13 @@ func TestShowHergebruiktVerbinding(t *testing.T) {
 		t.Fatal("een tweede Show hoort géén tweede verbinding te openen")
 	case <-time.After(300 * time.Millisecond):
 	}
+
+	// Close is definitief: de heel-lus mag niet na een seconde herverbinden
+	// (een host-proces zoals cmd/desktop leeft na een app-stop gewoon door).
 	c.Close()
+	select {
+	case <-accepts:
+		t.Fatal("na Close hoort de heel-lus nooit meer te verbinden")
+	case <-time.After(1500 * time.Millisecond):
+	}
 }

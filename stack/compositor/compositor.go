@@ -24,23 +24,30 @@ import (
 	"image"
 	"image/color"
 	"sync"
+	"time"
 
 	"github.com/xinix00/hop-os-surf/stack/pixel"
 )
 
-// Instrumentenpaneel-kleuren (docs/gui-ontwerp.md §5): vlak, 1-px randen,
-// geen gradients. De achtergrond is dezelfde als de fb-console — "beeld doet
-// het" is nooit een zwart scherm.
+// Het "HOP Slate"-thema (stack/pixel/theme.go): de chrome gebruikt het
+// gedeelde palet — aliassen zodat de tekencode leesbaar blijft.
 var (
-	colBG          = color.RGBA{0x10, 0x18, 0x28, 0xFF}
-	colContentPad  = color.RGBA{0x0A, 0x10, 0x1C, 0xFF}
-	colTitleFocus  = color.RGBA{0x2D, 0x6C, 0xDF, 0xFF}
-	colTitleIdle   = color.RGBA{0x24, 0x30, 0x4A, 0xFF}
-	colBorderFocus = color.RGBA{0x6E, 0xA8, 0xFF, 0xFF}
-	colBorderIdle  = color.RGBA{0x3A, 0x4A, 0x6A, 0xFF}
-	colText        = color.RGBA{0xF0, 0xF4, 0xFF, 0xFF}
-	colTextDim     = color.RGBA{0x8A, 0x94, 0xAA, 0xFF}
-	colBar         = color.RGBA{0x0A, 0x10, 0x1C, 0xFF} // taskbar
+	colContentPad  = pixel.ColSunk
+	colTitleFocus  = pixel.ColAccentD
+	colTitleIdle   = pixel.ColRaise
+	colBorderFocus = pixel.ColAccent
+	colBorderIdle  = pixel.ColLine
+	colText        = pixel.ColText
+	colTextDim     = pixel.ColDim
+	colBar         = pixel.ColPanel // taskbar
+
+	// De stoplichtjes (macOS-kleuren, rechts in de titelbalk): groen =
+	// maximaliseer, geel = minimaliseer, rood = sluit (proces killen).
+	// Zonder focus dimmen ze naar grijs — óók het macOS-gebaar.
+	colLightMax   = color.RGBA{0x28, 0xC8, 0x40, 0xFF}
+	colLightMin   = color.RGBA{0xFE, 0xBC, 0x2E, 0xFF}
+	colLightClose = color.RGBA{0xFF, 0x5F, 0x57, 0xFF}
+	colLightIdle  = pixel.ColLine
 )
 
 const margin = 8 // cascade-start en ademruimte langs de randen
@@ -62,6 +69,7 @@ type Surface struct {
 	hintW, hintH int             // de CREATE-wens
 	win          image.Rectangle // window incl. chrome; leeg = nog niet geplaatst
 	screen       image.Rectangle // content-rechthoek op het scherm
+	restore      image.Rectangle // win van vóór maximaliseren; leeg = normaal
 	minimized    bool            // uit beeld (taskbar-knop, of een dicht menu)
 	menu         bool            // CREATE.Role menu: het startmenu (de launcher)
 }
@@ -142,12 +150,15 @@ type Compositor struct {
 	titleH   int
 	taskH    int
 	scale    int
+	face     pixel.Face // chrome-font (F16 op een echt scherm, F12 klein)
+	clockStr string     // taskbar-klok (HH:MM), bijgehouden door clockLoop
 	cascade  image.Point
 
 	drag    *Surface    // window aan de muis (titelbalk-sleep)
 	dragOff image.Point // muis − win.Min bij het oppakken
 
 	onResize func(s *Surface, w, h int)
+	onClose  func(s *Surface) // rood stoplichtje: de eigenaar mag hem killen
 
 	// Damage-administratie voor kijker-streams (/stream): welke rechthoeken
 	// veranderden er per compose-generatie. pending verzamelt tussen twee
@@ -161,25 +172,81 @@ type Compositor struct {
 // New maakt een compositor voor een scherm van w×h pixels.
 func New(w, h int) *Compositor {
 	scale := 1
+	face := pixel.F12
 	if h >= 720 {
-		scale = 2 // zelfde regel als de fb-console: echt scherm → 2×
+		scale = 2 // zelfde regel als de fb-console: echt scherm → groter
+		face = pixel.F16
 	}
-	titleH := 8*scale + 6
-	return &Compositor{
+	titleH := face.H + 6
+	c := &Compositor{
 		img:      image.NewRGBA(image.Rect(0, 0, w, h)),
 		dirty:    true,
 		scale:    scale,
+		face:     face,
+		clockStr: time.Now().Format("15:04"),
 		titleH:   titleH,
 		taskH:    titleH + 8,
 		cascade:  image.Pt(margin*2, margin*2),
 		frameLog: make(map[uint64][]image.Rectangle),
 	}
+	go c.clockLoop()
+	return c
+}
+
+// clockLoop houdt de taskbar-klok bij: één kleine damage per minuutwissel —
+// de goedkoopste "dit is een desktop"-vibe die er bestaat.
+func (c *Compositor) clockLoop() {
+	for range time.Tick(10 * time.Second) {
+		now := time.Now().Format("15:04")
+		c.mu.Lock()
+		if now != c.clockStr {
+			c.clockStr = now
+			c.dirty = true
+			c.addDamageLocked(c.clockRectLocked())
+		}
+		c.mu.Unlock()
+	}
+}
+
+// clockRectLocked is het klok-vlakje rechts in de taskbar.
+func (c *Compositor) clockRectLocked() image.Rectangle {
+	bar := c.taskbarLocked()
+	w := pixel.TextWidth(c.face, 1, "00:00") + 12
+	return image.Rect(bar.Max.X-w, bar.Min.Y, bar.Max.X, bar.Max.Y)
+}
+
+// dropRect is win plus zijn slagschaduw (2px rechts+onder) — de rechthoek
+// die vuil wordt wanneer een window verschijnt, verdwijnt of beweegt.
+func dropRect(win image.Rectangle) image.Rectangle {
+	return image.Rect(win.Min.X, win.Min.Y, win.Max.X+2, win.Max.Y+2)
 }
 
 // OnResize registreert de callback die elke WM-maatwijziging meldt (de
 // server stuurt er CONFIGURE op uit). Wordt buiten de compositor-lock
 // aangeroepen; zetten vóór de eerste Add.
 func (c *Compositor) OnResize(f func(s *Surface, w, h int)) { c.onResize = f }
+
+// OnClose registreert de callback voor het rode stoplichtje: sluiten is
+// proces killen — de server stuurt CLOSE naar de app en ruimt het window op.
+// Wordt buiten de compositor-lock aangeroepen; zetten vóór de eerste Add.
+func (c *Compositor) OnClose(f func(s *Surface)) { c.onClose = f }
+
+// lightRectsLocked zijn de drie stoplichtjes in de titelbalk van s, van
+// binnen naar buiten: [0] maximaliseer (groen), [1] minimaliseer (geel),
+// [2] sluit (rood, buitenste — het Windows-gebaar met de macOS-kleuren).
+// Menu's (het startmenu) hebben er geen: een popup sluit je door te klikken.
+func (c *Compositor) lightRectsLocked(s *Surface) [3]image.Rectangle {
+	d := 8 + 2*(c.scale-1) // 8px klein scherm, 10px groot
+	gap := d / 2
+	y := s.win.Min.Y + (c.titleH-d)/2
+	x := s.win.Max.X - 7 - d
+	var r [3]image.Rectangle
+	for i := 2; i >= 0; i-- {
+		r[i] = image.Rect(x, y, x+d, y+d)
+		x -= d + gap
+	}
+	return r
+}
 
 // Size geeft de schermmaat.
 func (c *Compositor) Size() (w, h int) {
@@ -390,10 +457,45 @@ func (c *Compositor) contentAtLocked(x, y int) (s *Surface, lx, ly int, ok bool)
 	return nil, 0, 0, false
 }
 
-// PointerDown verwerkt een muis-down: taskbar-knoppen, titelbalk (raise +
-// sleep), of content (raise + doorsturen). ok=true betekent: dit is voor de
-// app, op surface-lokale coördinaten.
+// maxToggleLocked wisselt s tussen maximaal (het volle werkvlak) en zijn
+// oude plek. Geeft de nieuwe content-maat terug als die veranderde — de
+// aanroeper vuurt buiten de lock de OnResize-callback (CONFIGURE).
+func (c *Compositor) maxToggleLocked(s *Surface) (w, h int, resized bool) {
+	c.addDamageLocked(dropRect(s.win))
+	if s.restore.Empty() {
+		s.restore = s.win
+		s.win = c.workLocked()
+	} else {
+		s.win = s.restore
+		s.restore = image.Rectangle{}
+	}
+	s.screen = image.Rect(s.win.Min.X+1, s.win.Min.Y+c.titleH, s.win.Max.X-1, s.win.Max.Y-1)
+	c.addDamageLocked(dropRect(s.win))
+	c.dirty = true
+	cw, ch := s.screen.Dx(), s.screen.Dy()
+	if ow, oh := s.Size(); ow != cw || oh != ch {
+		s.resize(cw, ch)
+		return cw, ch, true
+	}
+	return 0, 0, false
+}
+
+// PointerDown verwerkt een muis-down: taskbar-knoppen, stoplichtjes,
+// titelbalk (raise + sleep), of content (raise + doorsturen). ok=true
+// betekent: dit is voor de app, op surface-lokale coördinaten.
 func (c *Compositor) PointerDown(x, y int) (s *Surface, lx, ly int, ok bool) {
+	// De hooks (OnClose, OnResize) vuren buiten de lock — LIFO: de unlock-
+	// defer staat ná deze en loopt dus eerst.
+	var closing, resizing *Surface
+	var rw, rh int
+	defer func() {
+		if resizing != nil && c.onResize != nil {
+			c.onResize(resizing, rw, rh)
+		}
+		if closing != nil && c.onClose != nil {
+			c.onClose(closing)
+		}
+	}()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	p := image.Pt(x, y)
@@ -419,9 +521,12 @@ func (c *Compositor) PointerDown(x, y int) (s *Surface, lx, ly int, ok bool) {
 		m.minimized = true
 		if c.focus == m {
 			c.focus = c.topLocked()
+			if c.focus != nil {
+				c.chromeDamageLocked(c.focus)
+			}
 		}
 		c.dirty = true
-		c.addDamageLocked(c.img.Bounds())
+		c.addDamageLocked(dropRect(m.win)) // alleen waar het menu lag komt iets bloot
 	}
 
 	for i := len(c.zstack) - 1; i >= 0; i-- {
@@ -432,6 +537,29 @@ func (c *Compositor) PointerDown(x, y int) (s *Surface, lx, ly int, ok bool) {
 		c.raiseLocked(cur)
 		bar := image.Rect(cur.win.Min.X, cur.win.Min.Y, cur.win.Max.X, cur.win.Min.Y+c.titleH)
 		if p.In(bar) {
+			if !cur.menu {
+				lights := c.lightRectsLocked(cur)
+				switch {
+				case p.In(lights[2]): // rood: sluiten = proces killen
+					closing = cur
+					return nil, 0, 0, false
+				case p.In(lights[1]): // geel: minimaliseren
+					cur.minimized = true
+					c.focus = c.topLocked()
+					c.addDamageLocked(dropRect(cur.win))
+					if c.focus != nil {
+						c.chromeDamageLocked(c.focus)
+					}
+					c.addDamageLocked(c.taskbarLocked())
+					c.dirty = true
+					return nil, 0, 0, false
+				case p.In(lights[0]): // groen: maximaliseren/herstellen
+					if w, h, ok := c.maxToggleLocked(cur); ok {
+						resizing, rw, rh = cur, w, h
+					}
+					return nil, 0, 0, false
+				}
+			}
 			c.drag = cur // slepen begint; Move verplaatst, Up laat los
 			c.dragOff = p.Sub(cur.win.Min)
 			return nil, 0, 0, false
@@ -480,25 +608,48 @@ func (c *Compositor) moveDragLocked(x, y int) {
 	if d == (image.Point{}) {
 		return
 	}
-	c.addDamageLocked(s.win)
+	c.addDamageLocked(dropRect(s.win))
 	s.win = s.win.Add(d)
 	s.screen = s.screen.Add(d)
-	c.addDamageLocked(s.win)
+	c.addDamageLocked(dropRect(s.win))
 	c.dirty = true
 }
 
-// raiseLocked brengt s naar voren en geeft hem focus.
+// raiseLocked brengt s naar voren en geeft hem focus. Damage naar wat er
+// écht verandert: al voor én gefocust = niets (elke klik in de voorste app
+// kostte anders window+taskbar — de "5kb per klik" in de KVM-stream, 20-07);
+// alleen focuswissel = de chrome (titelbalk+rand verkleurt, de inhoud niet);
+// echt naar voren = het volle window (er komt inhoud onder vandaan).
 func (c *Compositor) raiseLocked(s *Surface) {
+	top := len(c.zstack) > 0 && c.zstack[len(c.zstack)-1] == s
+	if top && c.focus == s {
+		return
+	}
 	if c.focus != s {
 		if c.focus != nil {
-			c.addDamageLocked(c.focus.win)
+			c.chromeDamageLocked(c.focus)
 		}
 		c.focus = s
 	}
-	c.zstack = append(without(c.zstack, s), s)
-	c.addDamageLocked(s.win)
+	if top {
+		c.chromeDamageLocked(s)
+	} else {
+		c.zstack = append(without(c.zstack, s), s)
+		c.addDamageLocked(dropRect(s.win))
+	}
 	c.addDamageLocked(c.taskbarLocked())
 	c.dirty = true
+}
+
+// chromeDamageLocked maakt alleen de window-chrome vuil: titelbalk en de
+// drie 1px-randen — vier smalle rects in plaats van het hele window in de
+// kijker-stream wanneer enkel de focuskleur wisselt.
+func (c *Compositor) chromeDamageLocked(s *Surface) {
+	w := s.win
+	c.addDamageLocked(image.Rect(w.Min.X, w.Min.Y, w.Max.X, w.Min.Y+c.titleH))
+	c.addDamageLocked(image.Rect(w.Min.X, w.Min.Y+c.titleH, w.Min.X+1, w.Max.Y))
+	c.addDamageLocked(image.Rect(w.Max.X-1, w.Min.Y+c.titleH, w.Max.X, w.Max.Y))
+	c.addDamageLocked(image.Rect(w.Min.X, w.Max.Y-1, w.Max.X, w.Max.Y))
 }
 
 // taskToggleLocked is de taskbar-knop: naar voren halen — en als hij al
@@ -508,14 +659,21 @@ func (c *Compositor) taskToggleLocked(s *Surface) {
 	case s.minimized:
 		s.minimized = false
 		c.raiseLocked(s)
+		// raiseLocked ziet hem al bovenop staan (minimize haalt hem niet uit
+		// de zstack) — maar hij komt uit het niets terug: heel het window.
+		c.addDamageLocked(dropRect(s.win))
 	case c.focus == s:
 		s.minimized = true
 		c.focus = c.topLocked()
+		c.addDamageLocked(dropRect(s.win)) // er komt inhoud onder vandaan
+		if c.focus != nil {
+			c.chromeDamageLocked(c.focus) // de nieuwe voorste verkleurt
+		}
+		c.addDamageLocked(c.taskbarLocked())
 	default:
 		c.raiseLocked(s)
 	}
 	c.dirty = true
-	c.addDamageLocked(c.img.Bounds())
 }
 
 // startToggleLocked is de startknop: het startmenu ís de app die zich met
@@ -563,15 +721,16 @@ func (c *Compositor) taskbarLocked() image.Rectangle {
 
 func (c *Compositor) startRectLocked() image.Rectangle {
 	bar := c.taskbarLocked()
-	w := pixel.StringWidth("hop", c.scale) + 12*c.scale
+	w := pixel.TextWidth(c.face, 1, "hop") + 16
 	return image.Rect(bar.Min.X+4, bar.Min.Y+4, bar.Min.X+4+w, bar.Max.Y-4)
 }
 
-// taskRectLocked is de knop van taskItems[i]: vaste breedte, naast de start.
+// taskRectLocked is de knop van taskItems[i]: vaste breedte, naast de start;
+// rechts blijft de klok vrij.
 func (c *Compositor) taskRectLocked(i int) image.Rectangle {
 	bar := c.taskbarLocked()
 	x0 := c.startRectLocked().Max.X + 6
-	avail := bar.Max.X - 4 - x0
+	avail := c.clockRectLocked().Min.X - 4 - x0
 	w := 120 * c.scale
 	if n := len(c.taskItemsLocked()); n > 0 && w*n > avail {
 		w = avail / n
@@ -636,35 +795,77 @@ func (c *Compositor) composeLocked() (gen uint64, changed bool) {
 		c.redrawRegionLocked(clip)
 	}
 	if len(c.surfaces) == 0 {
-		pixel.DrawString(c.img, margin, margin, 1, colBorderIdle, "hopos display: no surfaces")
+		pixel.DrawText(c.img, margin, margin, c.face, 1, colTextDim, "hopos display: no surfaces")
 	}
 	return c.gen, true
 }
 
 // redrawRegionLocked hertekent één schermregio deterministisch: achtergrond,
 // dan de windows van achter naar voor (de stapelvolgorde), dan de taskbar.
-// Titelbalk en rand worden bij een snijding integraal hertekend (goedkoop en
-// scheelt clip-logica in de tekst-glyphs).
+// Alle chrome tekent in sub (het clip-uitsnede-beeld): een titelbalk of rand
+// die de clip maar half raakt mag daarbuiten níks aanraken — daar kan een
+// hoger window al staan dat deze regio-pass niet hertekent (de spook-chrome
+// over de gemaximaliseerde browser, Derek 21-07).
 func (c *Compositor) redrawRegionLocked(clip image.Rectangle) {
 	clip = clip.Intersect(c.img.Bounds())
 	if clip.Empty() {
 		return
 	}
-	pixel.Fill(c.img, clip, colBG)
+	sub, _ := c.img.SubImage(clip).(*image.RGBA)
+	if sub == nil {
+		return // lege clip-uitsnede: niets te tekenen
+	}
+	pixel.VGrad(c.img, clip, c.img.Bounds(), pixel.ColDesk0, pixel.ColDesk1)
+
+	// Wordmark rechtsonder: bijna toon-op-toon, het bureaublad is nooit
+	// "gewoon zwart".
+	work := c.workLocked()
+	wm := "hop//os"
+	wmX := work.Max.X - pixel.TextWidth(pixel.F16, 2, wm) - margin*2
+	wmY := work.Max.Y - 32 - margin
+	pixel.DrawText(sub, wmX, wmY, pixel.F16, 2, pixel.ColLineDim, wm)
 
 	for _, s := range c.zstack {
-		if s.minimized || !s.win.Overlaps(clip) {
+		if s.minimized || !dropRect(s.win).Overlaps(clip) {
 			continue
 		}
-		title, border := colTitleIdle, colBorderIdle
+		// Slagschaduw eerst: verdonkert wat er tot nu toe onder ligt (bg +
+		// lagere windows) — deterministisch, want de stapel tekent van achter
+		// naar voor.
+		pixel.Shade(c.img, image.Rect(s.win.Max.X, s.win.Min.Y+2, s.win.Max.X+2, s.win.Max.Y+2).Intersect(clip))
+		pixel.Shade(c.img, image.Rect(s.win.Min.X+2, s.win.Max.Y, s.win.Max.X, s.win.Max.Y+2).Intersect(clip))
+		if !s.win.Overlaps(clip) {
+			continue
+		}
+		title, border, ttext, bevel := colTitleIdle, colBorderIdle, colTextDim, pixel.ColBevel
 		if s == c.focus {
-			title, border = colTitleFocus, colBorderFocus
+			title, border, ttext, bevel = colTitleFocus, colBorderFocus, colText, pixel.ColAccentL
 		}
 		bar := image.Rect(s.win.Min.X, s.win.Min.Y, s.win.Max.X, s.win.Min.Y+c.titleH)
 		if bar.Overlaps(clip) {
-			// Titelbalk + naam (het cluster zichtbaar in de chrome).
-			pixel.Fill(c.img, bar, title)
-			pixel.DrawString(c.img, s.win.Min.X+4*c.scale, s.win.Min.Y+3, c.scale, colText, s.Name)
+			// Titelbalk: notched vulling, 1px lichte bovenrand (bevel), de
+			// naam (het cluster zichtbaar in de chrome) en de stoplichtjes —
+			// alles in sub: buiten de clip kan een hoger window staan.
+			pixel.Fill(sub, image.Rect(bar.Min.X+1, bar.Min.Y, bar.Max.X-1, bar.Min.Y+1), title)
+			pixel.Fill(sub, image.Rect(bar.Min.X, bar.Min.Y+1, bar.Max.X, bar.Max.Y), title)
+			pixel.Fill(sub, image.Rect(bar.Min.X+2, bar.Min.Y+1, bar.Max.X-2, bar.Min.Y+2), bevel)
+			nameW := bar.Dx() - 16
+			if !s.menu {
+				lights := c.lightRectsLocked(s)
+				lMax, lMin, lClose := colLightMax, colLightMin, colLightClose
+				if s != c.focus {
+					lMax, lMin, lClose = colLightIdle, colLightIdle, colLightIdle
+				}
+				pixel.Disc(sub, lights[0], lMax)
+				pixel.Disc(sub, lights[1], lMin)
+				pixel.Disc(sub, lights[2], lClose)
+				nameW = lights[0].Min.X - s.win.Min.X - 14
+			}
+			name := s.Name
+			if max := nameW / c.face.W; len(name) > max && max > 1 {
+				name = name[:max-1] + "."
+			}
+			pixel.DrawText(sub, s.win.Min.X+8, s.win.Min.Y+(c.titleH-c.face.H)/2+1, c.face, 1, ttext, name)
 		}
 
 		if content := s.screen.Intersect(clip); !content.Empty() {
@@ -692,7 +893,7 @@ func (c *Compositor) redrawRegionLocked(clip image.Rectangle) {
 			s.mu.Unlock()
 		}
 
-		pixel.Outline(c.img, s.win, border)
+		pixel.OutlineNotched(sub, s.win, border)
 	}
 
 	if bar := c.taskbarLocked(); bar.Overlaps(clip) {
@@ -700,38 +901,45 @@ func (c *Compositor) redrawRegionLocked(clip image.Rectangle) {
 	}
 }
 
-// drawTaskbarLocked tekent de taskbar: startknop + een knop per window.
-// Gefocust = accent, geminimaliseerd = alleen een rand — één oogopslag.
+// drawTaskbarLocked tekent de taskbar: startknop, een pil per window en de
+// klok. Gefocust = accent, geminimaliseerd = verzonken — één oogopslag.
 func (c *Compositor) drawTaskbarLocked() {
 	bar := c.taskbarLocked()
 	pixel.Fill(c.img, bar, colBar)
-	pixel.Fill(c.img, image.Rect(bar.Min.X, bar.Min.Y, bar.Max.X, bar.Min.Y+1), colBorderIdle)
+	pixel.Fill(c.img, image.Rect(bar.Min.X, bar.Min.Y, bar.Max.X, bar.Min.Y+1), pixel.ColLine)
+	pixel.Fill(c.img, image.Rect(bar.Min.X, bar.Min.Y+1, bar.Max.X, bar.Min.Y+2), pixel.ColSunk)
 
 	start := c.startRectLocked()
-	pixel.Fill(c.img, start, colTitleFocus)
-	pixel.DrawStringCentered(c.img, start, c.scale, colText, "hop")
+	pixel.Card(c.img, start, pixel.ColAccentD, pixel.ColAccent)
+	pixel.DrawTextCentered(c.img, start, c.face, 1, colText, "hop")
 
-	ty := bar.Min.Y + (c.taskH-8*c.scale)/2
+	ty := bar.Min.Y + (c.taskH-c.face.H)/2 + 1
 	for i, s := range c.taskItemsLocked() {
 		r := c.taskRectLocked(i)
 		if r.Dx() <= 8 {
 			break // voller dan vol: liever geen knoppen dan onklikbare
 		}
-		txt, col := colText, colTitleIdle
 		switch {
 		case s.minimized:
-			txt, col = colTextDim, colBar
+			pixel.FillNotched(c.img, r, pixel.ColSunk)
+			pixel.OutlineNotched(c.img, r, pixel.ColLineDim)
 		case s == c.focus:
-			col = colTitleFocus
+			pixel.Card(c.img, r, pixel.ColAccentD, pixel.ColAccent)
+		default:
+			pixel.Card(c.img, r, pixel.ColRaise, pixel.ColLine)
 		}
-		pixel.Fill(c.img, r, col)
-		pixel.Outline(c.img, r, colBorderIdle)
+		txt := colText
+		if s.minimized {
+			txt = colTextDim
+		}
 		name := s.Name
-		if max := (r.Dx() - 8*c.scale) / (8 * c.scale); len(name) > max && max > 1 {
+		if max := (r.Dx() - 12) / c.face.W; len(name) > max && max > 1 {
 			name = name[:max-1] + "."
 		}
-		pixel.DrawString(c.img, r.Min.X+4*c.scale, ty, c.scale, txt, name)
+		pixel.DrawText(c.img, r.Min.X+6, ty, c.face, 1, txt, name)
 	}
+
+	pixel.DrawText(c.img, c.clockRectLocked().Min.X+6, ty, c.face, 1, colTextDim, c.clockStr)
 }
 
 // Snapshot geeft een kopie van het gecomponeerde beeld (voor de PNG-encoder:

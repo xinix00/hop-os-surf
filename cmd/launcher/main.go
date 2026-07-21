@@ -21,7 +21,7 @@ import (
 	"github.com/xinix00/hop-os-surf/stack/surf"
 )
 
-// action is één start of stop voor de worker (stop = Spec nil).
+// action is één start voor de worker (stoppen doet het rode stoplichtje).
 type action struct {
 	name string
 	spec []byte
@@ -69,7 +69,6 @@ func main() {
 	actC := make(chan action, 1)
 	m.Refresh = func() { post(refreshC, struct{}{}) }
 	m.OnStart = func(a launcher.App) { post(actC, action{name: a.Name, spec: a.Spec}) }
-	m.OnStop = func(name string) { post(actC, action{name: name}) }
 	conn.OnKey = m.Key
 
 	if err := m.Start(); err != nil {
@@ -96,14 +95,8 @@ func main() {
 			case <-refreshC:
 				fetch()
 			case act := <-actC:
-				var err error
-				if act.spec != nil {
-					err = client.Apply(act.spec)
-					app.Logf("launcher: start %s: %v", act.name, err)
-				} else {
-					err = client.Delete(act.name)
-					app.Logf("launcher: stop %s: %v", act.name, err)
-				}
+				err := client.Apply(act.spec)
+				app.Logf("launcher: start %s: %v", act.name, err)
 				if err != nil {
 					m.SetError(err)
 				} else {

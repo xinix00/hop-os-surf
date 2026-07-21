@@ -12,11 +12,15 @@ import (
 	_ "embed"
 	"errors"
 	"image"
+	"image/color"
 	_ "image/gif" // decoders voor <img>: puur Go, dus ook op tamago
 	_ "image/jpeg"
 	_ "image/png"
+
+	_ "golang.org/x/image/webp" // het halve nieuws-web serveert webp; ook puur Go
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"sort"
 	"strings"
@@ -50,6 +54,18 @@ type Session struct {
 	styles map[dom.Node]props     // computed CSS-props per element (zie loadStyles)
 	edits  map[dom.Node]string    // ingetikte veldwaarden (overleven een re-layout)
 	nerr   *netErr                // laatste transportfout uit de netProxy (nil bij handler-tests)
+	site   *siteID                // identiteit van de huidige site (kopbalk); nil = geen
+}
+
+// siteID is wat een site herkenbaar maakt zónder dat wij zijn logo (SVG)
+// kunnen rasteren: het apple-touch-icon (PNG — het icoon dat op een
+// telefoon-homescreen komt), de naam (og:site_name of de host) en de
+// themakleur (<meta name="theme-color">, de kleur die mobiele browsers om
+// de pagina heen tekenen). Samen: het NU.nl-balkje-effect.
+type siteID struct {
+	icon  image.Image
+	name  string
+	theme color.RGBA
 }
 
 // NewSession start een venster op de ingebouwde startpagina. Het netwerk
@@ -143,7 +159,19 @@ type netProxy struct {
 //go:embed cacert.pem
 var cacertPEM []byte
 
-var netClient = &http.Client{Timeout: 20 * time.Second, Transport: netTransport()}
+// netClient met een cookie-jar: consent-muren (DPG's privacy-gate op
+// tweakers.net en nu.nl) zetten hun "akkoord"-cookie op een redirect — zonder
+// jar kom je eeuwig op de muur terug. Eén jar per proces: dit is een
+// éénpersoonsbrowser. cookiejar is pure Go, dus ook op tamago.
+var netClient = &http.Client{Timeout: 20 * time.Second, Transport: netTransport(), Jar: newJar()}
+
+func newJar() http.CookieJar {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil // kan met Options=nil niet gebeuren; nil-Jar is gewoon "geen cookies"
+	}
+	return jar
+}
 
 // netTransport: de standaard-transport, met de systeempool waar die bestaat
 // (ontwikkelmachine) en anders de meegebakken bundel (bare metal). Let op:
@@ -169,6 +197,9 @@ func (p netProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out.Header = r.Header.Clone()
+	// Cookies zijn van ónze jar (op netClient): wat gost-dom zelf meestuurt
+	// weg — twee administraties door elkaar geeft dubbele/verouderde cookies.
+	out.Header.Del("Cookie")
 	if out.Header.Get("User-Agent") == "" {
 		// Wikipedia c.s. weigeren anonieme clients (403); wees gewoon wie
 		// we zijn.
@@ -215,25 +246,144 @@ func (s *Session) Go(addr string) error {
 	if !hasScheme(addr) {
 		addr = "http://" + addr
 	}
-	err := s.win.Navigate(addr)
-	if err == nil {
-		s.edits = nil // nieuwe pagina, verse velden
-		s.loadStyles()
-		s.loadImages()
-	}
-	return s.explain(err)
+	return s.navigate(addr)
 }
 
 // Follow navigeert naar een aangeklikte href, onaangeroerd: gost-dom lost
 // relatieve paden ("/x", "page2.html", "#anker") tegen de huidige pagina op.
 func (s *Session) Follow(href string) error {
-	err := s.win.Navigate(href)
+	return s.navigate(href)
+}
+
+// navigate is de gedeelde landing van Go en Follow: navigeren, een eventuele
+// consent-muur één keer automatisch door, en dan de subresources laden.
+func (s *Session) navigate(addr string) error {
+	err := s.win.Navigate(addr)
 	if err == nil {
-		s.edits = nil
+		// Consent-muur (DPG's privacy-gate: tweakers.net, nu.nl, ...)?
+		// Zonder scripts is die pagina letterlijk leeg — de door-URL staat
+		// er wel gewoon in. De hop zet het consent-cookie (jar!); daarna
+		// opnieuw naar het échte adres, zodat de adresbalk en de base voor
+		// relatieve links kloppen. Eén keer, dus nooit een lus; faalt de
+		// hop, dan blijft de muur staan en zie je tenminste wáár je bent.
+		if gate := consentGateURL(s.win.Document()); gate != "" {
+			target := s.win.Location().Href()
+			if s.win.Navigate(gate) == nil {
+				s.win.Navigate(target)
+			}
+			if s.nerr != nil {
+				s.nerr.take() // fout in de hop: muur tonen, niet klagen
+			}
+		}
+		s.edits = nil // nieuwe pagina, verse velden
 		s.loadStyles()
 		s.loadImages()
+		s.loadSiteID()
 	}
 	return s.explain(err)
+}
+
+// loadSiteID verzamelt icoon, naam en themakleur van de huidige pagina
+// (zie siteID). Draait in de nav-goroutine, net als de afbeeldingen.
+func (s *Session) loadSiteID() {
+	s.site = nil
+	base, err := url.Parse(s.win.Location().Href())
+	if err != nil || (base.Scheme != "http" && base.Scheme != "https") {
+		return
+	}
+	id := &siteID{name: strings.TrimPrefix(base.Hostname(), "www."), theme: colBar}
+	iconHref := ""
+	var walk func(n dom.Node)
+	walk = func(n dom.Node) {
+		if el, ok := n.(dom.Element); ok {
+			switch strings.ToLower(el.TagName()) {
+			case "link":
+				rel, _ := el.GetAttribute("rel")
+				rel = strings.ToLower(rel)
+				href, _ := el.GetAttribute("href")
+				if href == "" {
+					break
+				}
+				if strings.Contains(rel, "apple-touch-icon") {
+					iconHref = href // het homescreen-icoon: altijd de beste
+				} else if iconHref == "" && strings.Contains(rel, "icon") &&
+					(strings.Contains(strings.ToLower(href), ".png") || isPNGType(el)) {
+					iconHref = href
+				}
+			case "meta":
+				name, _ := el.GetAttribute("name")
+				prop, _ := el.GetAttribute("property")
+				content, _ := el.GetAttribute("content")
+				switch {
+				case strings.EqualFold(name, "theme-color") && content != "":
+					if c, ok := cssColor(strings.ToLower(strings.TrimSpace(content))); ok {
+						id.theme = c
+					}
+				case strings.EqualFold(prop, "og:site_name") && strings.TrimSpace(content) != "":
+					id.name = strings.TrimSpace(content)
+				}
+			}
+		}
+		for c := n.FirstChild(); c != nil; c = c.NextSibling() {
+			walk(c)
+		}
+	}
+	walk(s.win.Document())
+	if iconHref == "" {
+		iconHref = "/apple-touch-icon.png" // well-known pad: tweakers.net heeft geen link-tag, wél het icoon
+	}
+	id.icon = s.fetchImage(base, iconHref)
+	s.site = id
+}
+
+// isPNGType: heeft deze <link> een image/png-type?
+func isPNGType(el dom.Element) bool {
+	t, _ := el.GetAttribute("type")
+	return strings.EqualFold(strings.TrimSpace(t), "image/png")
+}
+
+// consentGateURL herkent een consent-muur en geeft de "klik hier verder"-URL
+// terug ("" als de pagina geen muur is). Het patroon (DPG Media, het halve
+// NL-web): een <script> met decodeURIComponent('https%3A%2F%2F...') waarin
+// een privacy-bevestigings-URL met authId zit; die URL GET'en — met de
+// cookie-jar — telt als de minimale (functionele-cookies) doorklik.
+func consentGateURL(doc dom.Node) string {
+	const marker = "decodeURIComponent('"
+	found := ""
+	var walk func(n dom.Node)
+	walk = func(n dom.Node) {
+		if found != "" {
+			return
+		}
+		if el, ok := n.(dom.Element); ok && strings.EqualFold(el.TagName(), "script") {
+			txt := el.TextContent()
+			for i := 0; ; {
+				j := strings.Index(txt[i:], marker)
+				if j < 0 {
+					break
+				}
+				start := i + j + len(marker)
+				end := strings.IndexByte(txt[start:], '\'')
+				if end < 0 {
+					break
+				}
+				u, err := url.QueryUnescape(txt[start : start+end])
+				if err == nil && hasScheme(u) && strings.Contains(u, "authId=") &&
+					strings.Contains(strings.ToLower(u), "privacy") {
+					found = u
+					return
+				}
+				i = start + end
+			}
+		}
+		for c := n.FirstChild(); c != nil; c = c.NextSibling() {
+			walk(c)
+		}
+	}
+	if doc != nil {
+		walk(doc)
+	}
+	return found
 }
 
 // --- formulieren ------------------------------------------------------------
@@ -332,9 +482,9 @@ func ancestorForm(n dom.Node) dom.Element {
 // Grenzen voor het CSS laden en matchen (zelfde gedachte als bij de
 // afbeeldingen: bare metal, begrensde heap en begrensde tijd).
 const (
-	cssMaxSheets = 4         // externe stylesheets per pagina
+	cssMaxSheets = 12        // externe stylesheets per pagina (tweakers: 11, de header-regel zit in #8)
 	cssMaxBytes  = 256 << 10 // per sheet, over de lijn
-	cssMaxRules  = 2048      // na het wegfilteren van layout-junk
+	cssMaxRules  = 4096      // na het wegfilteren van layout-junk en dode pseudo's
 	cssBudget    = 5 * time.Second
 )
 
@@ -352,16 +502,27 @@ func (s *Session) loadStyles() {
 	}
 	var rules []cssRule
 	links := 0
+	// media=""-attribuut: zelfde evaluatie als @media — een print-sheet of
+	// desktop-only sheet doet op ons telefoonvenster niet mee.
+	mediaOK := func(el dom.Element) bool {
+		m, ok := el.GetAttribute("media")
+		if !ok || strings.TrimSpace(m) == "" {
+			return true
+		}
+		return mediaMatches(m, mobileWidth)
+	}
 	var walk func(n dom.Node)
 	walk = func(n dom.Node) {
 		if el, ok := n.(dom.Element); ok {
 			switch strings.ToLower(el.TagName()) {
 			case "style":
-				rules = append(rules, parseCSS(n.TextContent(), len(rules))...)
+				if mediaOK(el) {
+					rules = append(rules, parseCSS(n.TextContent(), len(rules))...)
+				}
 			case "link":
 				rel, _ := el.GetAttribute("rel")
 				href, _ := el.GetAttribute("href")
-				if strings.EqualFold(strings.TrimSpace(rel), "stylesheet") && href != "" && links < cssMaxSheets {
+				if strings.EqualFold(strings.TrimSpace(rel), "stylesheet") && href != "" && links < cssMaxSheets && mediaOK(el) {
 					links++
 					rules = append(rules, parseCSS(s.fetchText(base, href), len(rules))...)
 				}
@@ -426,6 +587,27 @@ func (s *Session) loadStyles() {
 		for k, v := range p {
 			if strings.Contains(v, "var(") {
 				p[k] = resolveVars(v, vars)
+			}
+		}
+	}
+	// Kleuren op <html> gelden voor de pagina (html{background:...} is een
+	// gangbaar canvas-patroon), maar de layout wandelt vanaf body — schuif
+	// ze door naar body waar die ze zelf niet zet.
+	if root := doc.DocumentElement(); root != nil {
+		if hp := styles[dom.Node(root)]; hp != nil {
+			if body := doc.Body(); body != nil {
+				bp := styles[dom.Node(body)]
+				if bp == nil {
+					bp = props{}
+					styles[dom.Node(body)] = bp
+				}
+				for _, k := range []string{"color", "background-color", "background-image"} {
+					if _, ok := bp[k]; !ok {
+						if v, ok := hp[k]; ok {
+							bp[k] = v
+						}
+					}
+				}
 			}
 		}
 	}
@@ -554,7 +736,7 @@ func (s *Session) URL() string {
 // Layout layout de huidige pagina voor deze breedte, inclusief de bij de
 // navigatie opgehaalde afbeeldingen, CSS-props en ingetikte veldwaarden.
 func (s *Session) Layout(width int) Page {
-	return layoutStyled(s.win.Document().Body(), width, s.imgs, s.styles, s.edits)
+	return layoutStyled(s.win.Document().Body(), width, s.imgs, s.styles, s.edits, s.site)
 }
 
 // hasScheme: "letters://" aan het begin. "host:7878" is géén scheme.

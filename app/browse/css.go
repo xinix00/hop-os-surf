@@ -27,7 +27,7 @@ func supportedProp(p string) bool {
 	switch p {
 	case "display", "visibility", "color", "background-color", "background",
 		"background-image", "font-weight", "font-size", "text-align",
-		"border", "border-color", "flex-direction":
+		"border", "border-color", "flex-direction", "float", "clear":
 		return true
 	}
 	return false
@@ -76,9 +76,14 @@ func parseCSS(src string, seq0 int) []cssRule {
 			continue
 		}
 		if sel[0] == '@' {
-			// @media e.d.: block() heeft de hele geneste inhoud al
-			// overgeslagen; geneste regels bewust negeren (geen media
-			// queries op een 8x8-font).
+			// @media: evalueren tegen onze (mobiele) viewport — mobile-first
+			// sites zetten de basisstijl buiten de query, maar desktop-first
+			// sites verstoppen juist hun móbiele stijl (menu dicht, header-
+			// kleur) in een max-width-blok. Matcht de query, dan doen de
+			// geneste regels gewoon mee. Andere @-blokken blijven genegeerd.
+			if strings.HasPrefix(sel, "@media") && mediaMatches(sel[len("@media"):], mobileWidth) {
+				rules = append(rules, parseCSS(body, seq0+len(rules))...)
+			}
 			continue
 		}
 		decls := parseDecls(body)
@@ -86,8 +91,8 @@ func parseCSS(src string, seq0 int) []cssRule {
 			continue
 		}
 		for _, one := range strings.Split(sel, ",") {
-			one = strings.TrimSpace(one)
-			if one == "" {
+			one = simplifySelector(strings.TrimSpace(one))
+			if one == "" || deadSelector(one) {
 				continue
 			}
 			rules = append(rules, cssRule{
@@ -96,6 +101,249 @@ func parseCSS(src string, seq0 int) []cssRule {
 		}
 	}
 	return rules
+}
+
+// mobileWidth is de viewport waar @media-queries tegen geëvalueerd worden.
+// De styles worden bij het laden berekend (de windowbreedte is dan nog niet
+// bekend) en het venster is 480 breed — wij zíjn gewoon een telefoon.
+const mobileWidth = 480
+
+// mediaMatches evalueert een @media-query tegen breedte w. Bewust simpel:
+// komma's zijn OR, "and" is AND; gedragen zijn (min-width), (max-width),
+// de range-vorm (width <= ...) en de types screen/all. Onbekende features
+// en "not" matchen niet — liever een regel te weinig dan desktop-CSS op
+// een telefoonvenster.
+func mediaMatches(q string, w int) bool {
+	for _, branch := range strings.Split(strings.ToLower(q), ",") {
+		if mediaBranch(strings.TrimSpace(branch), w) {
+			return true
+		}
+	}
+	return false
+}
+
+func mediaBranch(b string, w int) bool {
+	if b == "" || strings.HasPrefix(b, "not ") || strings.Contains(b, " not ") {
+		return false
+	}
+	for _, part := range strings.Split(b, " and ") {
+		part = strings.TrimSpace(part)
+		switch part {
+		case "screen", "all", "only screen", "only all":
+			continue
+		}
+		if !mediaCond(part, w) {
+			return false
+		}
+	}
+	return true
+}
+
+// mediaCond: één (feature)-conditie. Zowel de klassieke vorm
+// (min-width: 768px) als de range-vorm (480px <= width < 64em).
+func mediaCond(c string, w int) bool {
+	c = strings.TrimSpace(c)
+	c = strings.TrimPrefix(c, "(")
+	c = strings.TrimSuffix(c, ")")
+	if i := strings.IndexByte(c, ':'); i >= 0 {
+		prop, val := strings.TrimSpace(c[:i]), strings.TrimSpace(c[i+1:])
+		// Wij zíjn een donker instrumentenpaneel: sites die hun dark theme
+		// netjes via @media schepen krijgen hem. En bewegen doen we niet.
+		switch prop {
+		case "prefers-color-scheme":
+			return val == "dark"
+		case "prefers-reduced-motion":
+			return val == "reduce"
+		}
+		v, ok := cssLen(val)
+		if !ok {
+			return false
+		}
+		switch prop {
+		case "min-width":
+			return w >= v
+		case "max-width":
+			return w <= v
+		}
+		return false
+	}
+	c = strings.ReplaceAll(c, " ", "")
+	i := strings.Index(c, "width")
+	if i < 0 {
+		return false
+	}
+	left, right := c[:i], c[i+len("width"):]
+	if lv, op, ok := splitCmp(left, true); ok {
+		if !cmpWidth(w, flip(op), lv) {
+			return false
+		}
+	} else if left != "" {
+		return false
+	}
+	if rv, op, ok := splitCmp(right, false); ok {
+		if !cmpWidth(w, op, rv) {
+			return false
+		}
+	} else if right != "" {
+		return false
+	}
+	return left != "" || right != ""
+}
+
+// splitCmp haalt operator en lengte uit "63em<=" (links van width) of
+// "<=63em" (rechts van width).
+func splitCmp(s string, leftSide bool) (px int, op string, ok bool) {
+	for _, o := range []string{"<=", ">=", "<", ">", "="} {
+		if leftSide && strings.HasSuffix(s, o) {
+			if v, ok := cssLen(strings.TrimSuffix(s, o)); ok {
+				return v, o, true
+			}
+			return 0, "", false
+		}
+		if !leftSide && strings.HasPrefix(s, o) {
+			if v, ok := cssLen(strings.TrimPrefix(s, o)); ok {
+				return v, o, true
+			}
+			return 0, "", false
+		}
+	}
+	return 0, "", false
+}
+
+// flip spiegelt een operator: "63em <= width" is "width >= 63em".
+func flip(op string) string {
+	switch op {
+	case "<=":
+		return ">="
+	case ">=":
+		return "<="
+	case "<":
+		return ">"
+	case ">":
+		return "<"
+	}
+	return op
+}
+
+func cmpWidth(w int, op string, v int) bool {
+	switch op {
+	case "<=":
+		return w <= v
+	case ">=":
+		return w >= v
+	case "<":
+		return w < v
+	case ">":
+		return w > v
+	case "=":
+		return w == v
+	}
+	return false
+}
+
+// cssLen: een CSS-lengte naar hele pixels (px, em/rem op 16px). Alleen voor
+// media-voorwaarden — layout rekent nergens in CSS-lengtes.
+func cssLen(v string) (int, bool) {
+	v = strings.TrimSpace(v)
+	mul := 1.0
+	switch {
+	case strings.HasSuffix(v, "rem"):
+		v, mul = strings.TrimSuffix(v, "rem"), 16
+	case strings.HasSuffix(v, "em"):
+		v, mul = strings.TrimSuffix(v, "em"), 16
+	case strings.HasSuffix(v, "px"):
+		v = strings.TrimSuffix(v, "px")
+	case v == "0":
+	default:
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+	if err != nil {
+		return 0, false
+	}
+	return int(f * mul), true
+}
+
+// simplifySelector vouwt pseudo's weg die bij ons statisch vaststaan:
+// :not(:hover), :not(:focus) enz. zijn áltijd waar (er is geen muis of
+// focus — de hele :not vervalt), en :is(X)/:where(X) met één argument ís
+// gewoon X. Belangrijk voor de verberg-regels van skip-links
+// (".skip:not(:focus)") en voor selector-engines die :is() niet kennen.
+func simplifySelector(sel string) string {
+	for pass := 0; pass < 8; pass++ {
+		changed := false
+		for _, fn := range []string{":not(", ":is(", ":where("} {
+			for from := 0; ; {
+				i := strings.Index(sel[from:], fn)
+				if i < 0 {
+					break
+				}
+				i += from
+				end := closeParen(sel, i+len(fn)-1)
+				if end < 0 {
+					break
+				}
+				inner := sel[i+len(fn) : end]
+				switch {
+				case strings.Contains(inner, ","):
+					from = i + 1 // meerdere argumenten: laten staan
+				case fn == ":not(" && deadSelector(inner):
+					sel = sel[:i] + sel[end+1:] // :not(nooit-waar) = altijd waar
+					changed = true
+					from = i
+				case fn != ":not(":
+					sel = sel[:i] + inner + sel[end+1:] // :is(X) = X
+					changed = true
+					from = i
+				default:
+					from = i + 1 // :not(.iets-echts): laten staan
+				}
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+	return strings.TrimSpace(sel)
+}
+
+// closeParen geeft de index van de ')' die de '(' op sel[open] sluit.
+func closeParen(sel string, open int) int {
+	depth := 0
+	for j := open; j < len(sel); j++ {
+		switch sel[j] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return j
+			}
+		}
+	}
+	return -1
+}
+
+// deadSelector: selectors die bij ons per definitie nooit matchen — geen
+// muis-hover, geen focusringen, geen gegenereerde ::before-content, geen
+// vendor-pseudo's. Echte stylesheets bestaan hier voor een flink deel uit;
+// eruit gooien bij het parsen scheelt evenzoveel QuerySelectorAll-rondes.
+var deadPseudos = []string{
+	":hover", ":focus", ":active", ":visited", ":target", ":checked",
+	":disabled", ":enabled", ":before", ":after", ":placeholder",
+	":selection", ":backdrop", ":fullscreen", ":-", "::-",
+}
+
+func deadSelector(sel string) bool {
+	if !strings.ContainsRune(sel, ':') {
+		return false // verreweg de meeste selectors: geen pseudo, klaar
+	}
+	for _, p := range deadPseudos {
+		if strings.Contains(sel, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // block geeft de inhoud tussen de accolade op src[open] en zijn sluiter
@@ -116,11 +364,20 @@ func block(src string, open int) (string, int) {
 	return src[open+1:], len(src)
 }
 
+// srProp is de synthetische property waarmee parseDecls "visueel verborgen
+// screenreader-tekst" markeert. Het sr-only-patroon is bewust géén
+// display:none (dan zwijgt de screenreader óók): het is 1x1px met clip, of
+// absoluut buiten beeld geparkeerd. Wij dragen clip/width/top niet als
+// layout, maar herkennen de signatuur bij het parsen — de losse properties
+// worden niet bewaard, dus de regel-filter blijft even streng.
+const srProp = "-surf-sr-hidden"
+
 // parseDecls parset "prop: waarde; prop: waarde" — alleen de gedragen
 // properties blijven over. "background: <kleur>" telt als
 // background-color als de waarde een kleur is (de gangbare shorthand).
 func parseDecls(s string) props {
 	var p props
+	var clip, clipPath, w, h, pos, top, left, bottom, ti, op string
 	for _, d := range strings.Split(s, ";") {
 		colon := strings.IndexByte(d, ':')
 		if colon < 0 {
@@ -128,7 +385,32 @@ func parseDecls(s string) props {
 		}
 		prop := strings.ToLower(strings.TrimSpace(d[:colon]))
 		val := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(d[colon+1:]), "!important")))
-		if val == "" || !supportedProp(prop) {
+		if val == "" {
+			continue
+		}
+		switch prop {
+		case "clip":
+			clip = val
+		case "clip-path":
+			clipPath = val
+		case "width":
+			w = val
+		case "height":
+			h = val
+		case "position":
+			pos = val
+		case "top":
+			top = val
+		case "left":
+			left = val
+		case "bottom":
+			bottom = val
+		case "text-indent":
+			ti = val
+		case "opacity":
+			op = val
+		}
+		if !supportedProp(prop) {
 			continue
 		}
 		if p == nil {
@@ -154,7 +436,86 @@ func parseDecls(s string) props {
 		}
 		p[prop] = val
 	}
+	if srHidden(clip, clipPath, w, h, pos, top, left, ti, op) {
+		if p == nil {
+			p = props{}
+		}
+		p[srProp] = "1"
+	}
+	// Het logo-patroon: een leeg element met background-image en een vaste
+	// maat ("image replacement"). De maten dragen we verder nergens — alleen
+	// mét een background-image reizen ze mee, zodat de layout er een echte
+	// afbeelding van kan maken en de regel-filter even streng blijft.
+	if p["background-image"] != "" {
+		if w != "" {
+			p["width"] = w
+		}
+		if h != "" {
+			p["height"] = h
+		}
+	}
+	// Het positionerings-kado: fixed/sticky vertelt ons wat chrome is —
+	// bovenin de header (pinnen bij het scrollen), onderin een cookiebar
+	// (weg). Alleen die twee waarden reizen mee (absolute/relative is
+	// binnen-layout: daar beginnen we niet aan), met hun top/bottom.
+	if pos == "fixed" || pos == "sticky" {
+		if p == nil {
+			p = props{}
+		}
+		p["position"] = pos
+		if top != "" {
+			p["top"] = top
+		}
+		if bottom != "" {
+			p["bottom"] = bottom
+		}
+	}
 	return p
+}
+
+// srHidden herkent visueel-verborgen in de losse declaraties: het 1x1px-
+// sr-only-doosje, alles weggeknipt, buiten beeld geparkeerd (position +
+// negatieve left/top, of text-indent — image replacement), of opacity:0
+// (skip-links; zonder JS is dat óók in een grote browser onzichtbaar).
+func srHidden(clip, clipPath, w, h, pos, top, left, ti, op string) bool {
+	if w == "1px" && h == "1px" {
+		return true
+	}
+	if f, err := strconv.ParseFloat(strings.TrimSuffix(op, "%"), 64); err == nil && f == 0 {
+		return true
+	}
+	if strings.HasPrefix(ti, "-") {
+		if n, ok := cssLen(ti[1:]); ok && n >= 999 {
+			return true
+		}
+	}
+	if strings.HasPrefix(clipPath, "inset(50%") || strings.HasPrefix(clipPath, "inset(100%") {
+		return true
+	}
+	if strings.HasPrefix(clip, "rect(") {
+		inner := strings.TrimSuffix(clip[len("rect("):], ")")
+		all := true
+		toks := strings.FieldsFunc(inner, func(r rune) bool { return r == ',' || r == ' ' })
+		for _, t := range toks {
+			if v, ok := cssLen(t); !ok || v > 1 {
+				all = false
+				break
+			}
+		}
+		if all && len(toks) == 4 {
+			return true
+		}
+	}
+	if pos == "absolute" || pos == "fixed" {
+		// 100px of meer het beeld uit is geen vormgeving meer, dat is
+		// verstoppen (tweakers' skip-links: left:-300px).
+		for _, v := range []string{top, left} {
+			if n, ok := cssLen(strings.TrimPrefix(v, "-")); ok && strings.HasPrefix(v, "-") && n >= 100 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // cssURL haalt de url uit een url(...)-waarde; "" als die er niet is.
@@ -256,19 +617,16 @@ func cssColor(v string) (color.RGBA, bool) {
 		return hexColor(v[1:])
 	}
 	if strings.HasPrefix(v, "rgb(") || strings.HasPrefix(v, "rgba(") {
-		inner := v[strings.IndexByte(v, '(')+1:]
-		if j := strings.IndexByte(inner, ')'); j >= 0 {
-			inner = inner[:j]
-		}
-		inner = strings.ReplaceAll(inner, "/", " ")
-		f := strings.FieldsFunc(inner, func(r rune) bool { return r == ',' || r == ' ' })
+		f := colorArgs(v)
 		if len(f) < 3 {
 			return color.RGBA{}, false
 		}
 		var c [3]uint8
 		for i := 0; i < 3; i++ {
-			n, err := strconv.Atoi(strings.TrimSpace(f[i]))
-			if err != nil || n < 0 || n > 255 {
+			// SCSS-output in het wild: ook fracties ("223.176...") en
+			// procenten. Afronden en klemmen, niet afkeuren.
+			n, ok := colorNum(f[i], 255)
+			if !ok {
 				return color.RGBA{}, false
 			}
 			c[i] = uint8(n)
@@ -277,10 +635,97 @@ func cssColor(v string) (color.RGBA, bool) {
 		// kleur wordt gewoon de kleur.
 		return color.RGBA{c[0], c[1], c[2], 0xFF}, true
 	}
+	if strings.HasPrefix(v, "hsl(") || strings.HasPrefix(v, "hsla(") {
+		f := colorArgs(v)
+		if len(f) < 3 {
+			return color.RGBA{}, false
+		}
+		h, ok1 := colorNum(f[0], 360)
+		s, ok2 := colorNum(f[1], 100)
+		li, ok3 := colorNum(f[2], 100)
+		if !ok1 || !ok2 || !ok3 {
+			return color.RGBA{}, false
+		}
+		return hslColor(h, s/100, li/100), true
+	}
 	if c, ok := namedColors[v]; ok {
 		return c, true
 	}
 	return color.RGBA{}, false
+}
+
+// colorArgs splitst de argumenten van rgb(a)/hsl(a): komma's, spaties en de
+// moderne "/"-alphanotatie zijn allemaal scheiders.
+func colorArgs(v string) []string {
+	inner := v[strings.IndexByte(v, '(')+1:]
+	if j := strings.IndexByte(inner, ')'); j >= 0 {
+		inner = inner[:j]
+	}
+	inner = strings.ReplaceAll(inner, "/", " ")
+	return strings.FieldsFunc(inner, func(r rune) bool { return r == ',' || r == ' ' })
+}
+
+// colorNum parset één kleurcomponent: kaal getal (ook met fractie), of een
+// percentage van max. Geklemd op [0, max]; "deg" mag op een hoek.
+func colorNum(s string, max float64) (float64, bool) {
+	s = strings.TrimSpace(strings.TrimSuffix(s, "deg"))
+	pct := strings.HasSuffix(s, "%")
+	f, err := strconv.ParseFloat(strings.TrimSuffix(s, "%"), 64)
+	if err != nil {
+		return 0, false
+	}
+	if pct {
+		f = f / 100 * max
+	}
+	if f < 0 {
+		f = 0
+	}
+	if f > max {
+		f = max
+	}
+	return f, true
+}
+
+// hslColor: HSL → RGB (CSS Color 3). h in graden, s en l in 0..1.
+func hslColor(h, s, l float64) color.RGBA {
+	c := (1 - abs64(2*l-1)) * s
+	hh := h / 60
+	x := c * (1 - abs64(mod64(hh, 2)-1))
+	var r, g, b float64
+	switch {
+	case hh < 1:
+		r, g, b = c, x, 0
+	case hh < 2:
+		r, g, b = x, c, 0
+	case hh < 3:
+		r, g, b = 0, c, x
+	case hh < 4:
+		r, g, b = 0, x, c
+	case hh < 5:
+		r, g, b = x, 0, c
+	default:
+		r, g, b = c, 0, x
+	}
+	m := l - c/2
+	to := func(f float64) uint8 { return uint8((f + m) * 255) }
+	return color.RGBA{to(r), to(g), to(b), 0xFF}
+}
+
+func abs64(f float64) float64 {
+	if f < 0 {
+		return -f
+	}
+	return f
+}
+
+func mod64(f, m float64) float64 {
+	for f >= m {
+		f -= m
+	}
+	for f < 0 {
+		f += m
+	}
+	return f
 }
 
 func hexColor(h string) (color.RGBA, bool) {
@@ -382,7 +827,10 @@ func fontScale(v string, cur int) int {
 	switch {
 	case px <= 0:
 		return cur
-	case px >= 24:
+	case px >= 28:
+		// Alleen échte display-koppen naar 3: op een venster van ~480px is
+		// schaal 3 maar ~20 tekens per regel — krantenkoppen (24-26px)
+		// lezen op 2 een stuk beter.
 		return 3
 	case px >= 17:
 		return 2

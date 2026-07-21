@@ -268,6 +268,163 @@ func TestPresentRects(t *testing.T) {
 	}
 }
 
+// frameRects decodeert de rects uit een FrameSince-frame.
+func frameRects(frame []byte) []image.Rectangle {
+	n := int(frame[4]) | int(frame[5])<<8
+	rects := make([]image.Rectangle, 0, n)
+	off := 6
+	for i := 0; i < n; i++ {
+		x := int(frame[off]) | int(frame[off+1])<<8
+		y := int(frame[off+2]) | int(frame[off+3])<<8
+		w := int(frame[off+4]) | int(frame[off+5])<<8
+		h := int(frame[off+6]) | int(frame[off+7])<<8
+		rects = append(rects, image.Rect(x, y, x+w, y+h))
+		off += 8
+	}
+	return rects
+}
+
+// TestKlikKostGeenFrame: interactie-damage is precies (de "5kb per klik" in
+// de KVM-stream, 20-07). Een klik in het voorste, gefocuste window kost níks
+// (raise is dan een no-op); een focuswissel kost het geraisde window plus
+// chrome-strips en de taskbar — nooit het volle scherm.
+func TestKlikKostGeenFrame(t *testing.T) {
+	c := New(320, 200)
+	s1 := c.Add("one", 100, 80, false)
+	s2 := c.Add("two", 100, 80, false)
+	c.Relayout()
+	fillPresent(c, s1, 0xAA, 0, 0)
+	fillPresent(c, s2, 0, 0xAA, 0)
+	_, gen := c.FrameSince(0) // het volle eerste frame is geweest
+
+	// Klik (down+up) midden in s2 — al bovenop, al focus: geen damage.
+	p := s2.screen.Min.Add(s2.screen.Size().Div(2))
+	c.PointerDown(p.X, p.Y)
+	c.PointerUp(p.X, p.Y)
+	if frame, ngen := c.FrameSince(gen); frame != nil {
+		t.Fatalf("klik op het gefocuste window kost een frame: gen %d→%d, rects %v",
+			gen, ngen, frameRects(frame))
+	}
+
+	// Focuswissel naar s1: wél een frame, maar nooit het volle scherm.
+	q := s1.screen.Min.Add(image.Pt(4, 4)) // s2 overlapt het midden (cascade)
+	c.PointerDown(q.X, q.Y)
+	c.PointerUp(q.X, q.Y)
+	frame, ngen := c.FrameSince(gen)
+	if frame == nil {
+		t.Fatal("focuswissel hoort zichtbaar te zijn")
+	}
+	gen = ngen
+	area := 0
+	for _, r := range frameRects(frame) {
+		if r == c.img.Bounds() {
+			t.Fatalf("focuswissel hoort geen vol scherm te sturen: %v", r)
+		}
+		area += r.Dx() * r.Dy()
+	}
+	if full := c.img.Bounds(); area >= full.Dx()*full.Dy() {
+		t.Fatalf("focuswissel-damage (%dpx) hoort onder schermmaat te blijven", area)
+	}
+
+	// Taskbar: minimize + herstel — ook zonder vol scherm, en het herstelde
+	// window komt volledig terug.
+	tb := c.taskRectLocked(0).Min.Add(c.taskRectLocked(0).Size().Div(2))
+	c.PointerDown(tb.X, tb.Y) // s1 gefocust → minimize
+	frame, ngen = c.FrameSince(gen)
+	if frame == nil {
+		t.Fatal("minimize hoort zichtbaar te zijn")
+	}
+	gen = ngen
+	for _, r := range frameRects(frame) {
+		if r == c.img.Bounds() {
+			t.Fatalf("minimize hoort geen vol scherm te sturen: %v", r)
+		}
+	}
+	c.PointerDown(tb.X, tb.Y) // herstel
+	frame, _ = c.FrameSince(gen)
+	if frame == nil {
+		t.Fatal("herstel hoort zichtbaar te zijn")
+	}
+	won := false
+	for _, r := range frameRects(frame) {
+		if s1.win.In(r) {
+			won = true
+		}
+	}
+	if !won {
+		t.Fatalf("herstel hoort heel s1.win te dragen: %v", frameRects(frame))
+	}
+}
+
+// TestStoplichten: de drie titelbalk-knoppen — groen maximaliseert (en
+// herstelt, met CONFIGURE), geel minimaliseert, rood vuurt OnClose (sluiten
+// is proces killen; het opruimen zelf is van de server). Menu's hebben geen
+// stoplichtjes: daar begint gewoon de sleep.
+func TestStoplichten(t *testing.T) {
+	c := New(320, 200)
+	var closed []string
+	c.OnClose(func(s *Surface) { closed = append(closed, s.Name) })
+	var resizes []string
+	c.OnResize(func(s *Surface, w, h int) { resizes = append(resizes, s.Name) })
+
+	s1 := c.Add("one", 100, 80, false)
+	menu := c.Add("menu", 100, 80, true)
+	c.Relayout()
+	resizes = nil
+
+	mid := func(r image.Rectangle) image.Point { return r.Min.Add(r.Size().Div(2)) }
+
+	// Groen: maximaliseren → het volle werkvlak, mét resize-callback...
+	p := mid(c.lightRectsLocked(s1)[0])
+	c.PointerDown(p.X, p.Y)
+	c.PointerUp(p.X, p.Y)
+	if s1.win != c.workLocked() {
+		t.Fatalf("maximaal hoort het werkvlak te zijn: %v != %v", s1.win, c.workLocked())
+	}
+	if len(resizes) != 1 || resizes[0] != "one" {
+		t.Fatalf("maximaliseren hoort één resize te melden: %v", resizes)
+	}
+	// ...en nog eens groen herstelt de oude plek.
+	p = mid(c.lightRectsLocked(s1)[0])
+	c.PointerDown(p.X, p.Y)
+	c.PointerUp(p.X, p.Y)
+	if w, h := s1.Size(); w != 100 || h != 80 {
+		t.Fatalf("herstellen hoort de hint terug te geven: %dx%d", w, h)
+	}
+
+	// Geel: minimaliseren.
+	p = mid(c.lightRectsLocked(s1)[1])
+	c.PointerDown(p.X, p.Y)
+	c.PointerUp(p.X, p.Y)
+	if !s1.minimized {
+		t.Fatal("geel hoort te minimaliseren")
+	}
+	s1.minimized = false
+
+	// Rood: OnClose vuurt; de klik is verder van niemand.
+	p = mid(c.lightRectsLocked(s1)[2])
+	if _, _, _, ok := c.PointerDown(p.X, p.Y); ok {
+		t.Fatal("een stoplicht-klik hoort nooit bij de app te komen")
+	}
+	c.PointerUp(p.X, p.Y)
+	if len(closed) != 1 || closed[0] != "one" {
+		t.Fatalf("rood hoort OnClose te vuren: %v", closed)
+	}
+
+	// Menu: geen stoplichtjes — dezelfde plek is daar titelbalk (sleep).
+	menu.minimized = false
+	c.raiseLocked(menu)
+	p = mid(c.lightRectsLocked(menu)[2])
+	c.PointerDown(p.X, p.Y)
+	if len(closed) != 1 {
+		t.Fatalf("een menu hoort geen sluitknop te hebben: %v", closed)
+	}
+	if c.drag != menu {
+		t.Fatal("op een menu-titelbalk hoort de sleep te beginnen")
+	}
+	c.PointerUp(p.X, p.Y)
+}
+
 // TestPartialComposeEquivalence: een reeks partiële composes — inclusief
 // raise, sleep en taskbar-geklik — eindigt in exact dezelfde pixels als één
 // volledige hertekening: de eigenschap die partieel componeren veilig maakt.
@@ -296,6 +453,22 @@ func TestPartialComposeEquivalence(t *testing.T) {
 	c.Compose() // partieel: sleep
 	task := c.taskRectLocked(1)
 	c.PointerDown(task.Min.X+2, task.Min.Y+2) // s2 naar voren
+	c.Compose()
+
+	// Maximaliseer s2 (groen licht) en present dan een blokje dat op het
+	// scherm half over de titelbalk van het bedolven s1 valt: chrome van een
+	// lager window mag buiten zijn clip niets aanraken (de spook-chrome over
+	// de gemaximaliseerde browser, 21-07).
+	lp := c.lightRectsLocked(s2)[0].Min.Add(image.Pt(3, 3))
+	c.PointerDown(lp.X, lp.Y)
+	c.PointerUp(lp.X, lp.Y)
+	c.Compose()
+	w2, h2 = s2.Size()
+	if err := s2.Damage(0, 0, w2, h2, wireFill(w2, h2, 0x20, 0x20, 0xEE)); err != nil {
+		t.Fatal(err)
+	}
+	cut := image.Rect(s1.win.Min.X+6, s1.win.Min.Y+2, s1.win.Min.X+40, s1.win.Min.Y+6)
+	c.PresentRects(s2, []image.Rectangle{cut.Sub(s2.screen.Min)})
 	c.Compose()
 	incr, _ := c.Snapshot()
 

@@ -9,15 +9,20 @@ import (
 	"image/draw"
 	"math"
 	"time"
+
+	"github.com/xinix00/hop-os-surf/stack/pixel"
 )
 
+// Thema-kleuren (HOP Slate): wijzerplaat op het panel, wijzers in tekstwit,
+// accenten voor de ticks en de secondewijzer.
 var (
-	colFace   = color.RGBA{0x18, 0x22, 0x36, 0xFF}
-	colRing   = color.RGBA{0xF0, 0xF4, 0xFF, 0xFF}
-	colTick   = color.RGBA{0x6E, 0xA8, 0xFF, 0xFF}
-	colHour   = color.RGBA{0xF0, 0xF4, 0xFF, 0xFF}
-	colMinute = color.RGBA{0xC0, 0xD0, 0xF0, 0xFF}
-	colSecond = color.RGBA{0xFF, 0x6E, 0x50, 0xFF}
+	colFace   = pixel.ColPanel
+	colRing   = pixel.ColLine
+	colTick   = pixel.ColAccent
+	colHour   = pixel.ColText
+	colMinute = pixel.ColDim
+	colSecond = pixel.ColWarn // de éne warme toets in het koele palet
+	colHub    = pixel.ColAccent
 )
 
 // HandsBox is de rechthoek waarbinnen álle wijzers en de naaf leven — het
@@ -58,7 +63,7 @@ func Draw(img *image.RGBA, now time.Time) {
 	hand(img, cx, cy, hr, 0, float64(r)*0.50, 3, colHour)
 	hand(img, cx, cy, mi, 0, float64(r)*0.74, 2, colMinute)
 	hand(img, cx, cy, se, 0, float64(r)*0.86, 1, colSecond)
-	dot(img, cx, cy, 3, colSecond)
+	dot(img, cx, cy, 3, colHub)
 }
 
 // hand tekent een wijzer/streep van radius r0 tot r1 onder hoek a (0 = 12

@@ -59,6 +59,17 @@ SCREENSHOT_OUT=$PWD/docs/launcher.png go test ./app/launcher -run Screenshot
 ![taskman](docs/taskman.png)
 ![launcher](docs/launcher.png)
 
+The browser renders real news sites (mobile view, live network — these
+refresh on every test run that touches `app/browse`):
+
+```sh
+go test ./app/browse -run ScreenshotSites   # writes docs/browser-<site>.png
+```
+
+| tweakers.net | nrc.nl | nu.nl |
+|---|---|---|
+| ![tweakers](docs/browser-tweakers.png) | ![nrc](docs/browser-nrc.png) | ![nu](docs/browser-nu.png) |
+
 ## Windows, not tiles
 
 Floating windows: an app gets the size it asks for in CREATE and *keeps* it

@@ -23,9 +23,37 @@ import (
 // BarH is de hoogte van de adresbalk boven de pagina; StatusH die van de
 // statusbalk eronder ("wat doet hij?" — laden, fouten, klaar).
 const (
-	BarH    = 20
-	StatusH = 16
+	BarH    = 24
+	StatusH = 18
 )
+
+// faceFor kiest het Spleen-font voor een layout-schaal: 1 = lopende tekst
+// (6x12), 2 = koppen (8x16), 3+ = h1 (8x16 op 2x). charW/charH zijn de
+// celmaten waarop de hele layout rekent (voorheen het 8x8-grid).
+func faceFor(scale int) (pixel.Face, int) {
+	switch {
+	case scale <= 1:
+		return pixel.F12, 1
+	case scale == 2:
+		return pixel.F16, 1
+	default:
+		return pixel.F16, 2
+	}
+}
+
+func charW(scale int) int           { f, s := faceFor(scale); return f.W * s }
+func charH(scale int) int           { f, s := faceFor(scale); return f.H * s }
+func textW(t string, scale int) int { return len(t) * charW(scale) }
+
+func drawTxt(img *image.RGBA, x, y, scale int, col color.RGBA, t string) {
+	f, s := faceFor(scale)
+	pixel.DrawText(img, x, y, f, s, col, t)
+}
+
+func drawTxtCentered(img *image.RGBA, r image.Rectangle, scale int, col color.RGBA, t string) {
+	f, s := faceFor(scale)
+	pixel.DrawTextCentered(img, r, f, s, col, t)
+}
 
 // Papier-look: pagina's zijn gemaakt voor zwart-op-wit; de chrome sluit aan
 // bij het instrumentenpaneel van de rest van de desktop.
@@ -68,7 +96,8 @@ type Box struct {
 	HasBG  bool
 	Border color.RGBA // blokrand (kaarten, panelen)
 	HasBrd bool
-	Field  int // >0: invoerveld/knop — index+1 in Page.Fields
+	Field  int  // >0: invoerveld/knop — index+1 in Page.Fields
+	Pin    bool // hoort bij de gepinde header (zie Page.PinY0/PinY1)
 }
 
 // Field is één formulierveld of -knop op de pagina. De waarde leeft in de
@@ -86,8 +115,17 @@ type Field struct {
 type Page struct {
 	Boxes  []Box
 	Fields []Field
-	Height int // documenthoogte in pixels (voor scroll-klemmen)
+	Height int        // documenthoogte in pixels (voor scroll-klemmen)
+	BG     color.RGBA // paginacanvas (body-achtergrond); HasBG=false → papierwit
+	HasBG  bool
+	// De gepinde header (position:fixed/sticky aan de bovenrand): de boxes
+	// met Pin=true beslaan documentregels [PinY0, PinY1); voorbij PinY0
+	// gescrold tekent View ze bovenin, zoals de site het vraagt.
+	PinY0, PinY1 int
 }
+
+// Pinned: is er een header om vast te houden?
+func (p *Page) Pinned() bool { return p.PinY1 > p.PinY0 }
 
 // style is de geërfde tekststijl tijdens de DOM-wandeling. CSS voedt
 // dezelfde velden als de tag-defaults — de cascade ís deze struct.
@@ -103,6 +141,16 @@ type style struct {
 	blockify bool // direct kind van een grid/flex-kolom: word een blok (ook een <a>)
 	bg       color.RGBA
 	hasBG    bool
+	on       color.RGBA // effectieve achtergrond ónder de tekst (contrastbewaking)
+	hasOn    bool
+}
+
+// flt is één actieve float: een afbeelding aan de kant waar de tekst langs
+// stroomt. w is de opgeëiste breedte (incl. marge), bot de onderkant in
+// documentcoördinaten, depth de blokdiepte waarop hij ontstond (voor het
+// impliciete clearen als dat blok sluit).
+type flt struct {
+	w, bot, depth int
 }
 
 type layouter struct {
@@ -118,6 +166,70 @@ type layouter struct {
 	edits  map[dom.Node]string // door de gebruiker ingetikte veldwaarden
 	line0  int                 // index van de eerste box op de huidige regel (voor centreren)
 	center bool                // deze regel centreren bij breakLine
+	fL, fR flt                 // actieve floats links en rechts
+	depth  int                 // blokdiepte tijdens de wandeling
+
+	pageBG    color.RGBA // body-achtergrond: het paginacanvas (Page.BG)
+	hasPageBG bool
+	pin       pinState
+}
+
+// pinState volgt de header die gepind gaat worden: tussen beginPin en
+// endPin krijgen nieuwe boxes Pin=true, en de y-range wordt Page.PinY0/1.
+type pinState struct {
+	active, done bool
+	box0, y0, y1 int
+}
+
+// beginPin: dit element vraagt fixed/sticky aan de bovenrand — pinnen als
+// het ook écht bovenin de pagina ligt (een modal halverwege is geen
+// header). Eén header per pagina; de eerste wint.
+func (l *layouter) beginPin(cp props) bool {
+	if l.pin.active || l.pin.done {
+		return false
+	}
+	if v, ok := cssLen(cp["top"]); cp["top"] != "" && (!ok || v > 8) {
+		return false // niet tegen de bovenrand geplakt
+	}
+	l.breakLine()
+	l.flushGap()
+	if l.y > 300 {
+		return false
+	}
+	l.pin = pinState{active: true, box0: len(l.boxes), y0: l.y}
+	return true
+}
+
+// endPin sluit de header af; te hoog (een fixed paneel of modal) betekent:
+// toch niet pinnen — dan scrollt hij gewoon mee.
+func (l *layouter) endPin() {
+	l.breakLine()
+	h := l.y - l.pin.y0
+	if h > 0 && h <= 120 && len(l.boxes) > l.pin.box0 {
+		for i := l.pin.box0; i < len(l.boxes); i++ {
+			l.boxes[i].Pin = true
+		}
+		l.pin.y1, l.pin.done = l.y, true
+	}
+	l.pin.active = false
+}
+
+// lineLeft/lineRight: de regelgrenzen op de huidige y, mét de actieve
+// floats — tekst stroomt er vanzelf langs en valt eronder weer breeduit.
+func (l *layouter) lineLeft(indent int) int {
+	x := pad + indent
+	if l.fL.w > 0 && l.y < l.fL.bot {
+		x += l.fL.w
+	}
+	return x
+}
+
+func (l *layouter) lineRight() int {
+	r := l.width - pad
+	if l.fR.w > 0 && l.y < l.fR.bot {
+		r -= l.fR.w
+	}
+	return r
 }
 
 // Layout wandelt de DOM onder body en vouwt hem tot boxes voor deze
@@ -132,19 +244,69 @@ func Layout(body dom.Node, width int) Page {
 // layout blijft puur en synchroon). Een <img> zonder plaatje valt terug op
 // zijn alt-tekst.
 func LayoutWithImages(body dom.Node, width int, imgs map[string]image.Image) Page {
-	return layoutStyled(body, width, imgs, nil, nil)
+	return layoutStyled(body, width, imgs, nil, nil, nil)
 }
 
 // layoutStyled is de volledige variant: mét de computed CSS-props uit
-// Session.loadStyles en de ingetikte veldwaarden. Inline style=""-
-// attributen werken altijd, ook zonder die map.
-func layoutStyled(body dom.Node, width int, imgs map[string]image.Image, styles map[dom.Node]props, edits map[dom.Node]string) Page {
+// Session.loadStyles, de ingetikte veldwaarden en de site-identiteit voor
+// de kopbalk. Inline style=""-attributen werken altijd, ook zonder die map.
+func layoutStyled(body dom.Node, width int, imgs map[string]image.Image, styles map[dom.Node]props, edits map[dom.Node]string, site *siteID) Page {
 	l := &layouter{width: width, imgs: imgs, styles: styles, edits: edits}
+	if site != nil {
+		l.siteBar(site)
+	}
 	if body != nil {
 		l.walk(body, style{scale: 1, col: colText})
 	}
 	l.breakLine()
-	return Page{Boxes: merge(l.boxes), Fields: l.fields, Height: l.y}
+	p := Page{Boxes: merge(l.boxes), Fields: l.fields, Height: l.y, BG: l.pageBG, HasBG: l.hasPageBG}
+	if l.pin.done {
+		p.PinY0, p.PinY1 = l.pin.y0, l.pin.y1
+	}
+	return p
+}
+
+// siteBar legt de site-identiteit als kopbalk bovenin het document: icoon
+// + naam op de themakleur. Geen chrome — hij scrollt gewoon mee, zoals de
+// header van de site zelf; klikken gaat naar de voorpagina ("/"). Zo is
+// élke site herkenbaar, ook nu wij logo's (SVG) niet kunnen rasteren.
+func (l *layouter) siteBar(id *siteID) {
+	const h = 40
+	txt := colBarTxt
+	if luma(id.theme) > 140 {
+		txt = colText // lichte themakleur → donkere tekst
+	}
+	l.boxes = append(l.boxes, Box{R: image.Rect(0, 0, l.width, h), Col: id.theme, Rule: true})
+	x := pad
+	if id.icon != nil {
+		const ic = 32
+		l.boxes = append(l.boxes, Box{R: image.Rect(x, (h-ic)/2, x+ic, (h-ic)/2+ic), Img: scaleTo(id.icon, ic, ic), Href: "/"})
+		x += ic + 8
+	}
+	name := ascii(id.name)
+	if max := (l.width - x - pad) / charW(2); len(name) > max && max > 3 {
+		name = name[:max]
+	}
+	ww := textW(name, 2)
+	l.boxes = append(l.boxes, Box{
+		R: image.Rect(x, (h-16)/2, x+ww, (h-16)/2+16), Text: name, Scale: 2,
+		Col: txt, Bold: true, Href: "/",
+	})
+	l.y = h
+	l.gap = lead // lucht tussen balk en eerste blok, zoals tussen blokken
+}
+
+// luma: waargenomen helderheid 0..255 (ITU-R BT.601) — kiest tekstkleuren
+// bij de themakleur en bewaakt het contrast op gekleurde vlakken.
+func luma(c color.RGBA) int {
+	return (299*int(c.R) + 587*int(c.G) + 114*int(c.B)) / 1000
+}
+
+func absInt(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
 }
 
 // blocks: elementen die een eigen regel (en marge) afdwingen.
@@ -204,6 +366,22 @@ func (l *layouter) element(el dom.Element, st style) {
 	if _, hidden := el.GetAttribute("hidden"); hidden {
 		return
 	}
+	// aria-hidden="true" op structuurelementen: het dichtgeklapte JS-menu
+	// (<nav class="full-menu">) en ad-panelen (<aside>) die visueel ook
+	// niemand ziet. Bewust níet op content: nu.nl markeert zijn (zichtbare!)
+	// teaserfoto's als decoratief — die willen we juist wel.
+	if v, ok := el.GetAttribute("aria-hidden"); ok && strings.TrimSpace(v) == "true" {
+		switch tag {
+		case "nav", "aside", "dialog", "menu":
+			return
+		}
+	}
+	// <dialog> zonder open is per spec display:none (cookiebanners!).
+	if tag == "dialog" {
+		if _, open := el.GetAttribute("open"); !open {
+			return
+		}
+	}
 	// Computed props (uit de stylesheets) + inline style="" (wint altijd).
 	cp := l.styles[dom.Node(el)]
 	if inline, ok := el.GetAttribute("style"); ok && inline != "" {
@@ -221,6 +399,25 @@ func (l *layouter) element(el dom.Element, st style) {
 	// display:none is de waardevolste property van allemaal: cookiebanners,
 	// dichtgeklapte menu's en ander verborgen vuil verdwijnen echt.
 	if cp["display"] == "none" || cp["visibility"] == "hidden" {
+		return
+	}
+	// Image replacement ("het logo-patroon"): een element met een
+	// background-image op vaste maat, waarvan de tekst leeg is of expres
+	// onzichtbaar gemaakt (text-indent:-9999px, sr-only) — dat élement ís
+	// de afbeelding. Renderen als plaatje, de weggeschoven tekst vervalt.
+	if m, w, h := l.bgReplacement(el, cp); m != nil {
+		l.imageSized(m, w, h, st)
+		return
+	}
+	// srProp is onze eigen vondst uit parseDecls: het sr-only-patroon
+	// (1x1px, weggeknipt of buiten beeld) — verborgen zónder display:none.
+	if cp[srProp] == "1" {
+		return
+	}
+	// Onderin vastgeplakt (fixed + bottom, geen top): een cookiebar of
+	// app-banner. Zonder JS is die niet weg te klikken en hij zou in de
+	// flow midden door de pagina renderen — weg ermee.
+	if cp["position"] == "fixed" && cp["top"] == "" && cp["bottom"] != "" {
 		return
 	}
 	if st.inline {
@@ -244,11 +441,28 @@ func (l *layouter) element(el dom.Element, st style) {
 		return
 	case "img":
 		if src, _ := el.GetAttribute("src"); l.imgs[src] != nil {
-			l.image(l.imgs[src], st)
+			fl := cp["float"]
+			if fl != "left" && fl != "right" && st.inline && l.fL.w == 0 && l.fR.w == 0 {
+				// Teaser-patroon: in een flex-rij gaat het (eerste) plaatje
+				// naar links en stroomt de kop ernaast — zonder dit stapelt
+				// alles onder elkaar en lijkt geen nieuwssite op zichzelf.
+				fl = "left"
+			}
+			if fl == "left" || fl == "right" {
+				l.floatImage(l.imgs[src], st, fl == "right")
+			} else {
+				l.image(l.imgs[src], st)
+			}
 			return
 		}
-		alt, _ := el.GetAttribute("alt")
+		// alt="" betekent in HTML: decoratief — dan ook géén placeholder.
+		// Zonder dit werd elk icoontje (svg, lazy geladen, mislukt) een
+		// grijze "[img]" en verzoop de pagina in de ruis.
+		alt, hasAlt := el.GetAttribute("alt")
 		if alt = strings.TrimSpace(alt); alt == "" {
+			if hasAlt {
+				return
+			}
 			alt = "img"
 		}
 		l.word("["+alt+"]", style{scale: st.scale, col: colRule, href: st.href, indent: st.indent})
@@ -271,6 +485,13 @@ func (l *layouter) element(el dom.Element, st style) {
 		}
 		l.widget(el, val, false, st)
 		return
+	}
+
+	// Bovenin vastgeplakt (fixed/sticky + top): de site zegt zelf "dit is
+	// mijn header, hou hem in beeld" — pinnen dus (zie pinState).
+	pinning := false
+	if p := cp["position"]; p == "fixed" || p == "sticky" {
+		pinning = l.beginPin(cp)
 	}
 
 	switch tag {
@@ -333,6 +554,13 @@ func (l *layouter) element(el dom.Element, st style) {
 		st.center = v == "center"
 	}
 
+	// Onthoud waar de tekst óp komt te liggen: het bg-vlak hieronder zet
+	// hasBG uit (de kinderen liggen al op het vlak), maar voor de
+	// contrastbewaking in word() moet de kleur eronder bekend blijven.
+	if st.hasBG {
+		st.on, st.hasOn = st.bg, true
+	}
+
 	// "Divs goed zetten": display:inline(-block) haalt een element uit de
 	// blok-flow, en de kinderen van een flex/grid-container komen náást
 	// elkaar in plaats van onder elkaar — precies genoeg voor menu's,
@@ -341,7 +569,10 @@ func (l *layouter) element(el dom.Element, st style) {
 	switch cp["display"] {
 	case "inline", "inline-block", "inline-flex":
 		isBlock = false
-	case "block", "list-item":
+	case "block", "list-item", "flex", "grid":
+		// flex en grid zíjn blok-niveau — ook op een <span> of een custom
+		// element (tweakers' <twk-site-menu>): anders krijgt zo'n container
+		// nooit zijn achtergrondvlak en behandelen we divs ongelijk.
 		isBlock = !st.inline
 	}
 	// childInline: krijgen de kínderen een inline-context (menu), en
@@ -408,6 +639,11 @@ func (l *layouter) element(el dom.Element, st style) {
 		bgX0 = pad + st.indent - 2
 		if tag == "body" {
 			bgX0 = 0
+			if st.hasBG {
+				// De body-kleur is het paginacanvas: ook onder de content en
+				// in de marge — een donkere site is dan echt donker.
+				l.pageBG, l.hasPageBG = st.bg, true
+			}
 		} else {
 			l.y += 4 // binnenmarge boven
 			st.indent += 6
@@ -419,8 +655,13 @@ func (l *layouter) element(el dom.Element, st style) {
 	childSt.inline = childInline
 	childSt.blockify = childBlockify
 
+	// clear: onder de lopende floats beginnen (footer onder de foto).
+	if v := cp["clear"]; v == "both" || v == "left" || v == "right" {
+		l.clearFloats(-1)
+	}
 	if isBlock {
 		l.blockGap(blockMargin(tag, st.scale))
+		l.depth++
 	}
 	if tag == "li" && isBlock {
 		l.word("-", st)
@@ -436,6 +677,10 @@ func (l *layouter) element(el dom.Element, st style) {
 		l.space = true
 	}
 	if isBlock {
+		l.depth--
+		// Impliciet clearen: floats die ín dit blok ontstonden eindigen
+		// hier — echte sites clearfixen hun kaarten toch.
+		l.clearFloats(l.depth)
 		l.blockGap(blockMargin(tag, st.scale))
 	}
 	if bgIdx >= 0 {
@@ -449,6 +694,9 @@ func (l *layouter) element(el dom.Element, st style) {
 		// Verticaal exact de blokgrenzen: de binnenmarge zit er al in, en
 		// ±2 zou aangrenzende kaarten laten overlappen.
 		l.boxes[bgIdx].R = image.Rect(bgX0, bgY0, x1, l.y)
+	}
+	if pinning {
+		l.endPin()
 	}
 }
 
@@ -494,21 +742,21 @@ func (l *layouter) widget(el dom.Element, val string, submit bool, st style) {
 			chars = n
 		}
 	}
-	w := chars*8*st.scale + 8
-	if max := l.width - 2*pad - st.indent; w > max {
+	w := chars*charW(st.scale) + 8
+	if max := l.lineRight() - l.lineLeft(st.indent); w > max {
 		w = max
 	}
-	h := 8*st.scale + 8
+	h := charH(st.scale) + 8
 	sp := 0
 	if l.space && l.x > 0 {
-		sp = 8 * st.scale
+		sp = charW(st.scale)
 	}
-	if l.x > 0 && l.x+sp+w > l.width-pad {
+	if l.x > 0 && l.x+sp+w > l.lineRight() {
 		l.breakLine()
 		sp = 0
 	}
 	if l.x == 0 {
-		l.x = pad + st.indent
+		l.x = l.lineLeft(st.indent)
 	}
 	x := l.x + sp
 	r := image.Rect(x, l.y, x+w, l.y+h)
@@ -534,9 +782,9 @@ func blockMargin(tag string, scale int) int {
 	}
 }
 
-// ascii vouwt tekst naar het 8x8-font (ASCII): typografische tekens naar
-// hun ASCII-neef, elk ander niet-ASCII-teken naar één '?' — zonder dit
-// werd een em-dash drie '?'-en (één per UTF-8-byte).
+// ascii vouwt tekst naar het 8x8-font (ASCII) via de folds-tabel; wat daar
+// niet in staat wordt één '?' — zonder dit werd een em-dash drie '?'-en
+// (één per UTF-8-byte).
 func ascii(s string) string {
 	i := 0
 	for ; i < len(s); i++ {
@@ -551,55 +799,90 @@ func ascii(s string) string {
 	b.Grow(len(s))
 	b.WriteString(s[:i])
 	for _, r := range s[i:] {
-		switch r {
-		case '–', '—', '−': // – — −
-			b.WriteByte('-')
-		case '‘', '’': // ‘ ’
-			b.WriteByte('\'')
-		case '“', '”': // “ ”
-			b.WriteByte('"')
-		case ' ':
-			b.WriteByte(' ')
-		case '•', '·': // • ·
-			b.WriteByte('-')
-		case '…': // …
-			b.WriteString("...")
-		case '×': // ×
-			b.WriteByte('x')
-		case '©': // ©
-			b.WriteString("(c)")
-		case '→': // →
-			b.WriteString("->")
-		default:
-			if r < 0x80 {
-				b.WriteRune(r)
-			} else {
-				b.WriteByte('?')
-			}
+		if r < 0x80 {
+			b.WriteRune(r)
+		} else if t, ok := folds[r]; ok {
+			b.WriteString(t)
+		} else {
+			b.WriteByte('?')
 		}
 	}
 	return b.String()
+}
+
+// folds: niet-ASCII → ASCII. Typografie naar de schrijfmachine-vorm,
+// accentletters naar hun kale vorm (ë → e — Nederlandse pagina's staan er
+// vol mee: Oekraïne, één, financiën), ligaturen uit elkaar, valuta naar hun
+// ISO-code.
+var folds = map[rune]string{
+	'–': "-", '—': "-", '−': "-", '‐': "-", '‑': "-",
+	'‘': "'", '’': "'", '‚': ",", '“': "\"", '”': "\"", '„': "\"",
+	'«': "<<", '»': ">>", '‹': "<", '›': ">",
+	' ': " ", ' ': " ", ' ': " ", '​': "",
+	'•': "-", '·': "-", '…': "...", '×': "x", '÷': "/",
+	'©': "(c)", '®': "(r)", '™': "(tm)", '°': "*", '±': "+/-",
+	'→': "->", '←': "<-", '↑': "^", '↓': "v",
+	'€': "EUR", '£': "GBP", '¥': "JPY", '¢': "c",
+	'à': "a", 'á': "a", 'â': "a", 'ã': "a", 'ä': "a", 'å': "a", 'æ': "ae",
+	'ç': "c", 'è': "e", 'é': "e", 'ê': "e", 'ë': "e",
+	'ì': "i", 'í': "i", 'î': "i", 'ï': "i", 'ñ': "n", 'ð': "d",
+	'ò': "o", 'ó': "o", 'ô': "o", 'õ': "o", 'ö': "o", 'ø': "o", 'œ': "oe",
+	'ù': "u", 'ú': "u", 'û': "u", 'ü': "u", 'ý': "y", 'ÿ': "y",
+	'ß': "ss", 'þ': "th", 'ĳ': "ij",
+	'À': "A", 'Á': "A", 'Â': "A", 'Ã': "A", 'Ä': "A", 'Å': "A", 'Æ': "AE",
+	'Ç': "C", 'È': "E", 'É': "E", 'Ê': "E", 'Ë': "E",
+	'Ì': "I", 'Í': "I", 'Î': "I", 'Ï': "I", 'Ñ': "N", 'Ð': "D",
+	'Ò': "O", 'Ó': "O", 'Ô': "O", 'Õ': "O", 'Ö': "O", 'Ø': "O", 'Œ': "OE",
+	'Ù': "U", 'Ú': "U", 'Û': "U", 'Ü': "U", 'Ý': "Y", 'Ÿ': "Y", 'Ĳ': "IJ",
+	'š': "s", 'Š': "S", 'ž': "z", 'Ž': "Z", 'č': "c", 'Č': "C",
 }
 
 // word plaatst één woord, met wrap op de paginabreedte.
 func (l *layouter) word(w string, st style) {
 	w = ascii(w)
 	l.flushGap()
-	ww := pixel.StringWidth(w, st.scale)
+	// Contrastbewaking: tekst die (bijna) wegvalt tegen zijn achtergrond —
+	// meestal een link waarvan wij de kleurregel niet dragen, op een donker
+	// menuvlak — klapt naar licht of donker. Liever leesbaar dan kleurecht.
+	if st.hasOn && absInt(luma(st.col)-luma(st.on)) < 90 {
+		if luma(st.on) < 128 {
+			st.col = colBarTxt
+		} else {
+			st.col = colText
+		}
+	}
+	ww := textW(w, st.scale)
 	sp := 0
 	if l.space && l.x > 0 {
-		sp = 8 * st.scale
+		sp = charW(st.scale)
 	}
-	if l.x > 0 && l.x+sp+ww > l.width-pad {
+	if l.x > 0 && l.x+sp+ww > l.lineRight() {
 		l.breakLine()
 		sp = 0
 	}
 	if l.x == 0 {
-		l.x = pad + st.indent
+		l.x = l.lineLeft(st.indent)
+		// Past het woord op een verse regel niet naast de float (een kop
+		// op schaal 3 naast een foto), spring er dan onder — anders liep
+		// hij het beeld uit.
+		for l.x+ww > l.lineRight() {
+			bot := 0
+			if l.fL.w > 0 && l.y < l.fL.bot {
+				bot = l.fL.bot
+			}
+			if l.fR.w > 0 && l.y < l.fR.bot && (bot == 0 || l.fR.bot < bot) {
+				bot = l.fR.bot
+			}
+			if bot == 0 {
+				break
+			}
+			l.y = bot
+			l.x = l.lineLeft(st.indent)
+		}
 	}
 	x := l.x + sp
 	l.boxes = append(l.boxes, Box{
-		R:     image.Rect(x, l.y, x+ww, l.y+8*st.scale),
+		R:     image.Rect(x, l.y, x+ww, l.y+charH(st.scale)),
 		Text:  w,
 		Scale: st.scale,
 		Col:   st.col,
@@ -609,7 +892,7 @@ func (l *layouter) word(w string, st style) {
 		HasBG: st.hasBG,
 	})
 	l.x = x + ww
-	if h := 8 * st.scale; h > l.lineH {
+	if h := charH(st.scale); h > l.lineH {
 		l.lineH = h
 	}
 	l.space = false
@@ -621,12 +904,37 @@ func (l *layouter) word(w string, st style) {
 // proportioneel verkleind; het schalen gebeurt hier (één keer per layout),
 // renderen is daarna een kale draw.Draw.
 func (l *layouter) image(m image.Image, st style) {
+	l.imageSized(m, m.Bounds().Dx(), m.Bounds().Dy(), st)
+}
+
+// bgReplacement herkent het logo-patroon op dit element: background-image
+// met vaste CSS-maat, en geen zichtbare tekst (leeg, of weggeschoven met
+// text-indent/sr-only). Geeft de afbeelding en de maat; nil als dit gewoon
+// een blok-met-achtergrond is.
+func (l *layouter) bgReplacement(el dom.Element, cp props) (image.Image, int, int) {
+	src := cssURL(cp["background-image"])
+	if src == "" || l.imgs[src] == nil {
+		return nil, 0, 0
+	}
+	w, ok1 := cssLen(cp["width"])
+	h, ok2 := cssLen(cp["height"])
+	if !ok1 || !ok2 || w < 8 || h < 8 || w > l.width || h > 600 {
+		return nil, 0, 0
+	}
+	if cp[srProp] != "1" && strings.TrimSpace(el.TextContent()) != "" {
+		return nil, 0, 0 // zichtbare tekst op een achtergrond: geen replacement
+	}
+	return l.imgs[src], w, h
+}
+
+// imageSized plaatst een afbeelding op een gegeven maat in de flow (image
+// replacement geeft de CSS-maat mee; een <img> zijn natuurlijke maat).
+func (l *layouter) imageSized(m image.Image, w, h int, st style) {
 	l.flushGap()
-	w, h := m.Bounds().Dx(), m.Bounds().Dy()
 	if w < 1 || h < 1 {
 		return
 	}
-	maxW := l.width - 2*pad - st.indent
+	maxW := l.lineRight() - l.lineLeft(st.indent)
 	if maxW < 8 {
 		maxW = 8
 	}
@@ -639,14 +947,14 @@ func (l *layouter) image(m image.Image, st style) {
 	}
 	sp := 0
 	if l.space && l.x > 0 {
-		sp = 8 * st.scale
+		sp = charW(st.scale)
 	}
-	if l.x > 0 && l.x+sp+w > l.width-pad {
+	if l.x > 0 && l.x+sp+w > l.lineRight() {
 		l.breakLine()
 		sp = 0
 	}
 	if l.x == 0 {
-		l.x = pad + st.indent
+		l.x = l.lineLeft(st.indent)
 	}
 	x := l.x + sp
 	l.boxes = append(l.boxes, Box{
@@ -660,6 +968,67 @@ func (l *layouter) image(m image.Image, st style) {
 	}
 	l.space = false
 	l.center = l.center || st.center
+}
+
+// floatImage legt een afbeelding als float neer: tegen de linker- of
+// rechterkant, de lopende tekst stroomt ernaast (lineLeft/lineRight) en
+// valt eronder weer breed uit. Nooit meer dan ~60% van de regel breed —
+// er moet tekst naast passen, anders was het geen float waard.
+func (l *layouter) floatImage(m image.Image, st style, right bool) {
+	l.breakLine()
+	l.flushGap()
+	w, h := m.Bounds().Dx(), m.Bounds().Dy()
+	if w < 1 || h < 1 {
+		return
+	}
+	maxW := (l.width - 2*pad - st.indent) / 2
+	if maxW < 8 {
+		maxW = 8
+	}
+	if w > maxW {
+		h = h * maxW / w
+		if h < 1 {
+			h = 1
+		}
+		w = maxW
+	}
+	x := pad + st.indent
+	if right {
+		x = l.width - pad - w
+	}
+	l.boxes = append(l.boxes, Box{R: image.Rect(x, l.y, x+w, l.y+h), Href: st.href, Img: scaleTo(m, w, h)})
+	f := flt{w: w + 8, bot: l.y + h + lead, depth: l.depth}
+	if right {
+		l.fR = f
+	} else {
+		l.fL = f
+	}
+	l.space = false
+}
+
+// clearFloats sluit de floats die dieper dan blokdiepte d ontstonden: de
+// y springt onder de foto. Dít maakt het kaart/teaser-patroon af — de
+// volgende teaser hoort ónder de vorige, niet in diens restruimte.
+func (l *layouter) clearFloats(d int) {
+	bot := 0
+	if l.fL.w > 0 && l.fL.depth > d {
+		if l.fL.bot > bot {
+			bot = l.fL.bot
+		}
+		l.fL = flt{}
+	}
+	if l.fR.w > 0 && l.fR.depth > d {
+		if l.fR.bot > bot {
+			bot = l.fR.bot
+		}
+		l.fR = flt{}
+	}
+	if bot > 0 {
+		l.breakLine()
+		if l.y < bot {
+			l.y = bot
+		}
+	}
 }
 
 // scaleTo schaalt src naar w×h met nearest-neighbor: geen extra dependency,
@@ -691,16 +1060,16 @@ func (l *layouter) preText(txt string, st style) {
 		if l.x == 0 {
 			l.x = pad + st.indent
 		}
-		ww := pixel.StringWidth(line, st.scale)
+		ww := textW(line, st.scale)
 		l.boxes = append(l.boxes, Box{
-			R:     image.Rect(l.x, l.y, l.x+ww, l.y+8*st.scale),
+			R:     image.Rect(l.x, l.y, l.x+ww, l.y+charH(st.scale)),
 			Text:  line,
 			Scale: st.scale,
 			Col:   st.col,
 			Href:  st.href,
 		})
 		l.x += ww
-		if h := 8 * st.scale; h > l.lineH {
+		if h := charH(st.scale); h > l.lineH {
 			l.lineH = h
 		}
 	}
@@ -748,7 +1117,7 @@ func (l *layouter) flushGap() {
 }
 
 // merge plakt woorden die op dezelfde regel met dezelfde stijl precies één
-// spatie uit elkaar staan aan elkaar: minder boxes, minder DrawString-werk.
+// spatie uit elkaar staan aan elkaar: minder boxes, minder tekenwerk.
 func merge(in []Box) []Box {
 	out := in[:0]
 	for _, b := range in {
@@ -758,7 +1127,8 @@ func merge(in []Box) []Box {
 				p.Field == 0 && b.Field == 0 && p.Tile == nil && b.Tile == nil &&
 				p.Scale == b.Scale && p.Col == b.Col && p.Href == b.Href &&
 				p.Bold == b.Bold && p.HasBG == b.HasBG && p.BG == b.BG &&
-				p.R.Min.Y == b.R.Min.Y && p.R.Max.X+8*p.Scale == b.R.Min.X {
+				p.Pin == b.Pin &&
+				p.R.Min.Y == b.R.Min.Y && p.R.Max.X+charW(p.Scale) == b.R.Min.X {
 				p.Text += " " + b.Text
 				p.R.Max.X = b.R.Max.X
 				continue
@@ -798,69 +1168,104 @@ func (v *View) Focused() *Field {
 // statusbalk rendert nooit pagina-inhoud.
 func (v *View) Render(img *image.RGBA) {
 	b := img.Bounds()
-	pixel.Fill(img, b, colPage)
+	canvas := colPage
+	if v.Page.HasBG {
+		canvas = v.Page.BG // donkere site: ook het canvas donker, niet alleen het body-vlak
+	}
+	pixel.Fill(img, b, canvas)
 	y0 := b.Min.Y + BarH
-	for _, bx := range v.Page.Boxes {
-		top := y0 + bx.R.Min.Y - v.Scroll
-		bot := y0 + bx.R.Max.Y - v.Scroll
-		if bot <= y0 || top >= b.Max.Y {
-			continue
+	pinned := v.pinnedNow()
+	for i := range v.Page.Boxes {
+		bx := &v.Page.Boxes[i]
+		if pinned && bx.Pin {
+			continue // komt zo bovenop, op zijn gepinde plek
 		}
-		if bx.Rule {
-			pixel.Fill(img, image.Rect(b.Min.X+bx.R.Min.X, top, b.Min.X+bx.R.Max.X, bot), bx.Col)
-			continue
-		}
-		if bx.Img != nil {
-			// Over, niet Src: PNG-transparantie hoort het paginawit te tonen.
-			r := image.Rect(b.Min.X+bx.R.Min.X, top, b.Min.X+bx.R.Max.X, bot)
-			draw.Draw(img, r, bx.Img, bx.Img.Bounds().Min, draw.Over)
-			continue
-		}
-		if bx.Field > 0 {
-			v.renderField(img, &bx, top, bot)
-			continue
-		}
-		if bx.Tile != nil || bx.HasBrd {
-			// Blok-achtergrond: kleur, dan tegelpatroon, dan de rand.
-			r := image.Rect(b.Min.X+bx.R.Min.X, top, b.Min.X+bx.R.Max.X, bot)
-			if bx.HasBG {
-				pixel.Fill(img, r, bx.BG)
+		v.drawBox(img, bx, y0+bx.R.Min.Y-v.Scroll, y0+bx.R.Max.Y-v.Scroll)
+	}
+	if pinned {
+		// De gepinde header: bovenin, over de gescrolde content heen. Eerst
+		// een dekkende strook in de canvaskleur — een header zonder eigen
+		// achtergrond zou anders transparant over de tekst zweven.
+		strip := image.Rect(b.Min.X, y0, b.Max.X, y0+v.Page.PinY1-v.Page.PinY0)
+		pixel.Fill(img, strip, canvas)
+		for i := range v.Page.Boxes {
+			bx := &v.Page.Boxes[i]
+			if !bx.Pin {
+				continue
 			}
-			if bx.Tile != nil {
-				tw, th := bx.Tile.Bounds().Dx(), bx.Tile.Bounds().Dy()
-				for ty := r.Min.Y; ty < r.Max.Y; ty += th {
-					for tx := r.Min.X; tx < r.Max.X; tx += tw {
-						dst := image.Rect(tx, ty, tx+tw, ty+th).Intersect(r)
-						draw.Draw(img, dst, bx.Tile, bx.Tile.Bounds().Min, draw.Over)
-					}
-				}
-			}
-			if bx.HasBrd {
-				// Niet clippen naar het beeld: SetRGBA buiten beeld is al
-				// een no-op, en clippen zou valse randen op de snijlijn
-				// tekenen bij een half-zichtbaar blok.
-				pixel.Outline(img, r, bx.Border)
-			}
-			continue
-		}
-		if bx.HasBG {
-			// 1px lucht rondom: leest prettiger en dekt de spatie in een
-			// samengevoegde run.
-			pixel.Fill(img, image.Rect(b.Min.X+bx.R.Min.X-1, top-1, b.Min.X+bx.R.Max.X+1, bot+1), bx.BG)
-		}
-		pixel.DrawString(img, b.Min.X+bx.R.Min.X, top, bx.Scale, bx.Col, bx.Text)
-		if bx.Bold {
-			// Pseudo-vet: het 8x8-font heeft geen gewichten — dubbel
-			// tekenen met 1px offset is er verrassend dichtbij.
-			pixel.DrawString(img, b.Min.X+bx.R.Min.X+1, top, bx.Scale, bx.Col, bx.Text)
-		}
-		if bx.Href != "" {
-			pixel.Fill(img, image.Rect(b.Min.X+bx.R.Min.X, bot, b.Min.X+bx.R.Max.X, bot+1), bx.Col)
+			v.drawBox(img, bx, y0+bx.R.Min.Y-v.Page.PinY0, y0+bx.R.Max.Y-v.Page.PinY0)
 		}
 	}
 	v.RenderBar(img)
 	v.RenderStatus(img)
 	v.renderScrollbar(img)
+}
+
+// pinnedNow: is er een header én zijn we er voorbij gescrold? Daarvóór
+// staat hij gewoon in de flow op precies dezelfde plek.
+func (v *View) pinnedNow() bool {
+	return v.Page.Pinned() && v.Scroll > v.Page.PinY0
+}
+
+// drawBox tekent één box op de al berekende schermpositie (top/bot) — de
+// hoofdlus geeft scroll-coördinaten, de pin-pas de vastgezette.
+func (v *View) drawBox(img *image.RGBA, bx *Box, top, bot int) {
+	b := img.Bounds()
+	y0 := b.Min.Y + BarH
+	if bot <= y0 || top >= b.Max.Y {
+		return
+	}
+	if bx.Rule {
+		pixel.Fill(img, image.Rect(b.Min.X+bx.R.Min.X, top, b.Min.X+bx.R.Max.X, bot), bx.Col)
+		return
+	}
+	if bx.Img != nil {
+		// Over, niet Src: PNG-transparantie hoort het paginawit te tonen.
+		r := image.Rect(b.Min.X+bx.R.Min.X, top, b.Min.X+bx.R.Max.X, bot)
+		draw.Draw(img, r, bx.Img, bx.Img.Bounds().Min, draw.Over)
+		return
+	}
+	if bx.Field > 0 {
+		v.renderField(img, bx, top, bot)
+		return
+	}
+	if bx.Tile != nil || bx.HasBrd {
+		// Blok-achtergrond: kleur, dan tegelpatroon, dan de rand.
+		r := image.Rect(b.Min.X+bx.R.Min.X, top, b.Min.X+bx.R.Max.X, bot)
+		if bx.HasBG {
+			pixel.Fill(img, r, bx.BG)
+		}
+		if bx.Tile != nil {
+			tw, th := bx.Tile.Bounds().Dx(), bx.Tile.Bounds().Dy()
+			for ty := r.Min.Y; ty < r.Max.Y; ty += th {
+				for tx := r.Min.X; tx < r.Max.X; tx += tw {
+					dst := image.Rect(tx, ty, tx+tw, ty+th).Intersect(r)
+					draw.Draw(img, dst, bx.Tile, bx.Tile.Bounds().Min, draw.Over)
+				}
+			}
+		}
+		if bx.HasBrd {
+			// Niet clippen naar het beeld: SetRGBA buiten beeld is al
+			// een no-op, en clippen zou valse randen op de snijlijn
+			// tekenen bij een half-zichtbaar blok.
+			pixel.Outline(img, r, bx.Border)
+		}
+		return
+	}
+	if bx.HasBG {
+		// 1px lucht rondom: leest prettiger en dekt de spatie in een
+		// samengevoegde run.
+		pixel.Fill(img, image.Rect(b.Min.X+bx.R.Min.X-1, top-1, b.Min.X+bx.R.Max.X+1, bot+1), bx.BG)
+	}
+	drawTxt(img, b.Min.X+bx.R.Min.X, top, bx.Scale, bx.Col, bx.Text)
+	if bx.Bold {
+		// Pseudo-vet: het font heeft geen gewichten — dubbel tekenen met
+		// 1px offset is er verrassend dichtbij.
+		drawTxt(img, b.Min.X+bx.R.Min.X+1, top, bx.Scale, bx.Col, bx.Text)
+	}
+	if bx.Href != "" {
+		pixel.Fill(img, image.Rect(b.Min.X+bx.R.Min.X, bot, b.Min.X+bx.R.Max.X, bot+1), bx.Col)
+	}
 }
 
 // renderScrollbar tekent een smalle positie-indicator aan de rechterrand —
@@ -900,13 +1305,13 @@ func (v *View) renderField(img *image.RGBA, bx *Box, top, bot int) {
 	if v.Focus == bx.Field && !f.Submit {
 		txt += "_"
 	}
-	if max := (r.Dx() - 8) / (8 * bx.Scale); len(txt) > max && max > 0 {
+	if max := (r.Dx() - 8) / charW(bx.Scale); len(txt) > max && max > 0 {
 		txt = txt[len(txt)-max:] // het einde in beeld: daar wordt getikt
 	}
 	if f.Submit {
-		pixel.DrawStringCentered(img, r, bx.Scale, colText, txt)
+		drawTxtCentered(img, r, bx.Scale, colText, txt)
 	} else {
-		pixel.DrawString(img, r.Min.X+4, r.Min.Y+(r.Dy()-8*bx.Scale)/2, bx.Scale, colText, txt)
+		drawTxt(img, r.Min.X+4, r.Min.Y+(r.Dy()-charH(bx.Scale))/2, bx.Scale, colText, txt)
 	}
 }
 
@@ -918,10 +1323,10 @@ func (v *View) RenderBar(img *image.RGBA) {
 	pixel.Fill(img, bar, colBar)
 	txt := v.Addr + "_"
 	// Houd het einde in beeld: daar wordt getypt.
-	if max := (b.Dx() - 2*pad) / 8; len(txt) > max && max > 0 {
+	if max := (b.Dx() - 2*pad) / charW(1); len(txt) > max && max > 0 {
 		txt = txt[len(txt)-max:]
 	}
-	pixel.DrawString(img, b.Min.X+pad, b.Min.Y+(BarH-8)/2, 1, colBarTxt, txt)
+	drawTxt(img, b.Min.X+pad, b.Min.Y+(BarH-charH(1))/2, 1, colBarTxt, txt)
 }
 
 // RenderStatus tekent alléén de statusbalk onderin (voor het laad-pad:
@@ -930,14 +1335,14 @@ func (v *View) RenderStatus(img *image.RGBA) {
 	r := v.StatusRect(img)
 	pixel.Fill(img, r, colBar)
 	txt := v.Status
-	if max := (r.Dx() - 2*pad) / 8; len(txt) > max && max > 0 {
+	if max := (r.Dx() - 2*pad) / charW(1); len(txt) > max && max > 0 {
 		txt = txt[:max] // begin in beeld houden: daar staat wát hij doet
 	}
 	col := colBarTxt
 	if v.Err {
 		col = colErrBar
 	}
-	pixel.DrawString(img, r.Min.X+pad, r.Min.Y+(StatusH-8)/2, 1, col, txt)
+	drawTxt(img, r.Min.X+pad, r.Min.Y+(StatusH-charH(1))/2, 1, col, txt)
 }
 
 // Bar is de adresbalk-rechthoek in beeldcoördinaten (voor partiële Present).
@@ -952,6 +1357,17 @@ func (v *View) StatusRect(img *image.RGBA) image.Rectangle {
 	return image.Rect(b.Min.X, b.Max.Y-StatusH, b.Max.X, b.Max.Y)
 }
 
+// docPoint vertaalt een klik (window-lokaal) naar documentcoördinaten,
+// rekening houdend met de gepinde header: een klik op de vaste strook
+// hoort bij de header, wáár je ook gescrold bent. inPin zegt of de klik
+// op die strook viel (dan telt alleen de header mee als doel).
+func (v *View) docPoint(x, y int) (p image.Point, inPin bool) {
+	if v.pinnedNow() && y-BarH < v.Page.PinY1-v.Page.PinY0 {
+		return image.Pt(x, y-BarH+v.Page.PinY0), true
+	}
+	return image.Pt(x, y-BarH+v.Scroll), false
+}
+
 // Hit vertaalt een klik (window-lokale coördinaten, viewH = windowhoogte)
 // naar de href van de link eronder; "" als daar geen link is. Kliks op de
 // adres- en statusbalk zijn nooit een link.
@@ -959,8 +1375,11 @@ func (v *View) Hit(x, y, viewH int) string {
 	if y < BarH || y >= viewH-StatusH {
 		return ""
 	}
-	p := image.Pt(x, y-BarH+v.Scroll)
+	p, inPin := v.docPoint(x, y)
 	for _, bx := range v.Page.Boxes {
+		if inPin && !bx.Pin {
+			continue // de strook dekt de content eronder af
+		}
 		if bx.Href != "" && p.In(bx.R) {
 			return bx.Href
 		}
@@ -974,9 +1393,13 @@ func (v *View) HitField(x, y, viewH int) int {
 	if y < BarH || y >= viewH-StatusH {
 		return 0
 	}
-	p := image.Pt(x, y-BarH+v.Scroll)
+	p, inPin := v.docPoint(x, y)
 	for i := range v.Page.Fields {
-		if p.In(v.Page.Fields[i].R) {
+		r := v.Page.Fields[i].R
+		if inPin && (r.Min.Y < v.Page.PinY0 || r.Min.Y >= v.Page.PinY1) {
+			continue // veld buiten de header telt niet op de strook
+		}
+		if p.In(r) {
 			return i + 1
 		}
 	}

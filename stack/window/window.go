@@ -41,7 +41,8 @@ type Window struct {
 
 	mu           sync.Mutex
 	conn         net.Conn
-	dead         bool // leesgoroutine zag de verbinding sterven
+	dead         bool // leesgoroutine zag de verbinding sterven (helen mag)
+	closed       bool // Close geroepen: nooit meer helen, events gaat dicht
 	pendW, pendH int  // door de WM opgelegde maat (CONFIGURE), nog te verwerken
 	frame        uint32
 	scratch      []byte // wire-conversiebuffer (RGBA → XRGB8888)
@@ -132,6 +133,10 @@ func (win *Window) Events() <-chan Event { return win.events }
 func (win *Window) pingLoop() {
 	for range time.Tick(10 * time.Second) {
 		win.mu.Lock()
+		if win.closed {
+			win.mu.Unlock()
+			return
+		}
 		conn, dead := win.conn, win.dead
 		var err error
 		if conn != nil && !dead {
@@ -154,9 +159,23 @@ func (win *Window) Present(rects ...image.Rectangle) error {
 		if err == nil {
 			return nil
 		}
+		// Na Close niet helen: een host-proces (cmd/desktop) leeft na een
+		// app-stop door, en de heel-lus bracht het window anders gewoon terug.
+		win.mu.Lock()
+		closed := win.closed
+		win.mu.Unlock()
+		if closed {
+			return err
+		}
 		win.logf("window: display lost (%v), reconnecting", err)
 		for {
 			time.Sleep(500 * time.Millisecond)
+			win.mu.Lock()
+			closed = win.closed
+			win.mu.Unlock()
+			if closed {
+				return err
+			}
 			if err := win.connect(); err == nil {
 				break
 			}
@@ -213,6 +232,12 @@ func (win *Window) present(rects []image.Rectangle) error {
 // connect zet (opnieuw) een sessie op: HELLO + CREATE, en de leesgoroutine
 // voor input. Surface-id is altijd 1 — één window per Window.
 func (win *Window) connect() error {
+	win.mu.Lock()
+	if win.closed {
+		win.mu.Unlock()
+		return errClosed
+	}
+	win.mu.Unlock()
 	conn, err := net.DialTimeout("tcp", win.addr, 5*time.Second)
 	if err != nil {
 		return err
@@ -279,6 +304,15 @@ func (win *Window) readLoop(conn net.Conn) {
 			}
 			win.deliver(Event{Kind: in.Kind, Code: in.Code, Value: in.Value, X: in.X, Y: in.Y})
 		case surf.TypeClose:
+			// De WM sloot ons window (het rode stoplichtje): definitief —
+			// events dicht (een Drive-lus eindigt daarop), nooit meer helen.
+			win.mu.Lock()
+			win.dead = true
+			if !win.closed {
+				win.closed = true
+				close(win.events)
+			}
+			win.mu.Unlock()
 			conn.Close()
 			return
 		}
@@ -286,8 +320,14 @@ func (win *Window) readLoop(conn net.Conn) {
 }
 
 // deliver zet een event in de buffer; bij een volle buffer valt het oudste
-// weg — input is een verse-waarde-stroom, geen log.
+// weg — input is een verse-waarde-stroom, geen log. Onder de mutex, zodat
+// Close het kanaal veilig kan sluiten: alle sends zijn non-blocking.
 func (win *Window) deliver(ev Event) {
+	win.mu.Lock()
+	defer win.mu.Unlock()
+	if win.closed {
+		return
+	}
 	select {
 	case win.events <- ev:
 	default:
@@ -302,11 +342,16 @@ func (win *Window) deliver(ev Event) {
 	}
 }
 
-// Close sluit de sessie netjes af.
+// Close sluit de sessie netjes én definitief af: CLOSE naar de display,
+// events dicht (een Drive-lus eindigt daarop) en nooit meer helen.
 func (win *Window) Close() error {
 	win.mu.Lock()
 	conn := win.conn
 	win.dead = true
+	if !win.closed {
+		win.closed = true
+		close(win.events) // veilig: deliver zit onder dezelfde mutex
+	}
 	win.mu.Unlock()
 	if conn == nil {
 		return nil

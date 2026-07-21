@@ -12,11 +12,11 @@ package surfserve
 // Paginatekst in het Engels: dit is scherm-output.
 const kvmPage = `<!doctype html>
 <html><head><meta charset="utf-8"><title>HopOS display</title><style>
-  body{margin:0;background:#0a101c;color:#f0f4ff;font-family:ui-monospace,monospace}
-  #bar{padding:6px 10px;background:#101828;border-bottom:1px solid #3a4a6a;font-size:13px}
-  #bar b{color:#6ea8ff}
+  body{margin:0;background:#060a14;color:#e9eef8;font-family:ui-monospace,monospace}
+  #bar{padding:6px 10px;background:#121a2e;border-bottom:1px solid #2e3e66;font-size:13px}
+  #bar b{color:#4c8dff}
   #s{display:block;margin:10px auto;outline:none;image-rendering:pixelated;
-     border:1px solid #3a4a6a;max-width:calc(100vw - 20px)}
+     border:1px solid #2e3e66;max-width:calc(100vw - 20px)}
 </style></head><body>
 <div id="bar"><b>HopOS web-KVM</b> — click the screen to focus a window; keys and mouse are forwarded</div>
 <canvas id="s" tabindex="0"></canvas>

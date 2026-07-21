@@ -10,6 +10,9 @@ cd "$(dirname "$0")/.."
 # bibliotheek-packages wel — inclusief de end-to-end-keten in surfserve.
 go test "$@" ./stack/... ./app/...
 
+# De host-desktop (go run ./cmd/desktop) is de enige host-main: meebouwen.
+go build -o /dev/null ./cmd/desktop
+
 TAMAGO="${TAMAGO:-$HOME/tamago-go/bin/go}"
 if [ ! -x "$TAMAGO" ]; then
 	echo "tamago-gate OVERGESLAGEN ($TAMAGO ontbreekt)" >&2
