@@ -1,7 +1,8 @@
-// SVG: heel veel logo's (tweakers, NRC) en iconen zijn vectors — oksvg +
-// rasterx rasteren ze naar pixels, puur Go, dus ook op tamago. Drie routes
-// komen hier samen: inline <svg> in de pagina, <img src="*.svg"> en
-// svg-iconen/achtergronden via de Session.
+// SVG: heel veel logo's (tweakers, NRC) en iconen zijn vectors —
+// tdewolff/canvas parseert en rastert ze (echte gradients, strokes,
+// transforms; puur Go, dus ook op tamago). Drie routes komen hier samen:
+// inline <svg> in de pagina, <img src="*.svg"> en svg-iconen/
+// achtergronden via de Session.
 package browse
 
 import (
@@ -11,14 +12,14 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/srwiley/oksvg"
-	"github.com/srwiley/rasterx"
+	"github.com/tdewolff/canvas"
+	"github.com/tdewolff/canvas/renderers/rasterizer"
 	"golang.org/x/net/html"
 )
 
 // rasterSVG rastert een SVG naar precies w×h. SVG's uit het wilde web
-// kunnen oksvg laten struikelen (filters, <text>, CSS-in-SVG): elke fout
-// of panic is gewoon "geen beeld" — de aanroeper valt dan stil terug.
+// kunnen de parser laten struikelen (filters, CSS-in-SVG): elke fout of
+// panic is gewoon "geen beeld" — de aanroeper valt dan stil terug.
 func rasterSVG(data []byte, w, h int) (m *image.RGBA) {
 	defer func() {
 		if recover() != nil {
@@ -28,27 +29,36 @@ func rasterSVG(data []byte, w, h int) (m *image.RGBA) {
 	if w < 1 || h < 1 || w > imgMaxDim || h > imgMaxDim {
 		return nil
 	}
-	icon, err := oksvg.ReadIconStream(bytes.NewReader(data), oksvg.IgnoreErrorMode)
-	if err != nil {
+	// LET OP: canvas rekt een viewBox x/y-apart de width/height-attr-doos
+	// in (negeert preserveAspectRatio) — een use-symbol met een andere
+	// verhouding dan zijn host-doos (NRC's logo: 491:147 in 110x55) werd
+	// zo uitgerekt. De attrs eraf: de viewBox is dé verhouding, en het
+	// passen in de doos doet de letterbox hieronder.
+	c, err := canvas.ParseSVG(bytes.NewReader(stripRootSize(data)))
+	if err != nil || c.W <= 0 || c.H <= 0 {
 		return nil
 	}
 	// preserveAspectRatio (default xMidYMid meet): een svg wordt pássend
-	// gemaakt in zijn doos, niet uitgerekt — tenzij de bron expliciet
-	// "none" zegt (dan is rekken de bedoeling).
-	tx, ty, tw, th := 0.0, 0.0, float64(w), float64(h)
-	if vw, vh := icon.ViewBox.W, icon.ViewBox.H; vw > 0 && vh > 0 &&
-		!bytes.Contains(bytes.ToLower(svgHead(data)), []byte(`preserveaspectratio="none"`)) {
-		s := tw / vw
-		if th/vh < s {
-			s = th / vh
-		}
-		tw, th = vw*s, vh*s
-		tx, ty = (float64(w)-tw)/2, (float64(h)-th)/2
+	// gemaakt in zijn doos (uniforme schaal, gecentreerd op transparant),
+	// niet uitgerekt — tenzij de bron expliciet "none" zegt.
+	s := float64(w) / c.W
+	if s2 := float64(h) / c.H; s2 < s {
+		s = s2
 	}
-	icon.SetTarget(tx, ty, tw, th)
-	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	icon.Draw(rasterx.NewDasher(w, h, rasterx.NewScannerGV(w, h, img, img.Bounds())), 1)
-	return img
+	img := rasterizer.Draw(c, canvas.DPMM(s), canvas.DefaultColorSpace)
+	if img == nil || img.Bounds().Dx() < 1 || img.Bounds().Dy() < 1 {
+		return nil
+	}
+	if bytes.Contains(bytes.ToLower(svgHead(data)), []byte(`preserveaspectratio="none"`)) {
+		return scaleTo(img, w, h) // rekken is hier de bedoeling
+	}
+	if img.Bounds().Dx() == w && img.Bounds().Dy() == h {
+		return img
+	}
+	out := image.NewRGBA(image.Rect(0, 0, w, h))
+	off := image.Pt((w-img.Bounds().Dx())/2, (h-img.Bounds().Dy())/2)
+	draw.Draw(out, img.Bounds().Add(off), img, img.Bounds().Min, draw.Over)
+	return out
 }
 
 // rasterSVGNatural rastert op de eigen maat: width/height uit de bron, of
@@ -60,16 +70,16 @@ func rasterSVGNatural(data []byte, maxDim int) (m *image.RGBA) {
 			m = nil
 		}
 	}()
-	icon, err := oksvg.ReadIconStream(bytes.NewReader(data), oksvg.IgnoreErrorMode)
-	if err != nil {
+	c, err := canvas.ParseSVG(bytes.NewReader(data))
+	if err != nil || c.W <= 0 || c.H <= 0 {
 		return nil
 	}
-	w, h := int(icon.ViewBox.W), int(icon.ViewBox.H)
+	// Met width/height-attributen zijn c.W/c.H die pixelmaten; met alleen
+	// een viewBox een geschaalde lezing — dan telt enkel de verhouding.
+	w, h := int(c.W+0.5), int(c.H+0.5)
 	if w < 1 || h < 1 {
 		return nil
 	}
-	// oksvg vult ViewBox óók uit width/height-attributen; of die er echt
-	// stonden zien we alleen aan de bron zelf.
 	if head := svgHead(data); !bytes.Contains(head, []byte("width")) || !bytes.Contains(head, []byte("height")) {
 		w, h = defaultObjectSize(w, h, maxDim)
 	}
@@ -112,7 +122,7 @@ func rasterSVGSheet(data []byte, maxDim int) *image.RGBA {
 	if w < 1 || h < 1 || w > maxDim || h > maxDim {
 		return nil
 	}
-	canvas := image.NewRGBA(image.Rect(0, 0, w, h))
+	vel := image.NewRGBA(image.Rect(0, 0, w, h))
 	for _, s := range subs {
 		sw, sh := svgFloat(s, "width"), svgFloat(s, "height")
 		if sw < 1 || sh < 1 {
@@ -127,10 +137,81 @@ func rasterSVGSheet(data []byte, maxDim int) *image.RGBA {
 			continue
 		}
 		if m := rasterSVG(buf.Bytes(), sw, sh); m != nil {
-			draw.Draw(canvas, image.Rect(x, y, x+sw, y+sh), m, image.Point{}, draw.Over)
+			draw.Draw(vel, image.Rect(x, y, x+sw, y+sh), m, image.Point{}, draw.Over)
 		}
 	}
-	return canvas
+	return vel
+}
+
+// stripRootSize haalt de width/height-attributen van de wortel-<svg> af
+// als er een viewBox is: de aanroeper bepaalt de doelmaat al, en de
+// viewBox draagt de verhouding — zo kan de parser niets uitrekken.
+func stripRootSize(data []byte) []byte {
+	i := bytes.Index(data, []byte("<svg"))
+	if i < 0 {
+		return data
+	}
+	end := bytes.IndexByte(data[i:], '>')
+	if end < 0 {
+		return data
+	}
+	head := data[i : i+end]
+	if !bytes.Contains(bytes.ToLower(head), []byte("viewbox")) {
+		return data // zonder viewBox zíjn de attrs de enige maat
+	}
+	stripped := dropAttr(dropAttr(head, "width"), "height")
+	if len(stripped) == len(head) {
+		return data
+	}
+	out := make([]byte, 0, len(data)-len(head)+len(stripped))
+	out = append(out, data[:i]...)
+	out = append(out, stripped...)
+	return append(out, data[i+end:]...)
+}
+
+// dropAttr verwijdert één attribuut (naam="waarde") uit een tag-kop —
+// grens-bewust: style="width:…" en stroke-width blijven staan.
+func dropAttr(head []byte, name string) []byte {
+	low := bytes.ToLower(head)
+	n := []byte(name)
+	for i := 0; ; {
+		j := bytes.Index(low[i:], n)
+		if j < 0 {
+			return head
+		}
+		j += i
+		if j == 0 || !isSpace(low[j-1]) {
+			i = j + 1
+			continue
+		}
+		k := j + len(n)
+		for k < len(low) && isSpace(low[k]) {
+			k++
+		}
+		if k >= len(low) || low[k] != '=' {
+			i = j + 1
+			continue
+		}
+		k++
+		for k < len(low) && isSpace(low[k]) {
+			k++
+		}
+		if k < len(low) && (low[k] == '"' || low[k] == '\'') {
+			q := low[k]
+			m := bytes.IndexByte(low[k+1:], q)
+			if m < 0 {
+				return head
+			}
+			k += 1 + m + 1
+		} else {
+			for k < len(low) && !isSpace(low[k]) && low[k] != '>' {
+				k++
+			}
+		}
+		head = append(head[:j-1:j-1], head[k:]...)
+		low = bytes.ToLower(head)
+		i = j - 1
+	}
 }
 
 // svgHead: de openings-tag van het svg-element (voor attribuut-detectie).
@@ -320,7 +401,20 @@ func (l *layouter) inlineSVG(el *html.Node, st style) {
 	if html.Render(&buf, el) != nil {
 		return
 	}
-	m := rasterSVG(buf.Bytes(), w, h)
+	data := buf.Bytes()
+	// fill/stroke: currentColor — "de kleur van hier": de computed color
+	// van de svg zelf, anders de geërfde cascade-kleur. Alomtegenwoordig op
+	// iconen; zonder invulling rastert oksvg ze zwart of helemaal niet.
+	if bytes.Contains(data, []byte("currentColor")) || bytes.Contains(data, []byte("currentcolor")) {
+		col := st.col
+		if c, ok := cssColor(cp["color"]); ok {
+			col = c
+		}
+		hex := []byte(hexCSS(col))
+		data = bytes.ReplaceAll(data, []byte("currentColor"), hex)
+		data = bytes.ReplaceAll(data, []byte("currentcolor"), hex)
+	}
+	m := rasterSVG(data, w, h)
 	if m == nil {
 		return
 	}

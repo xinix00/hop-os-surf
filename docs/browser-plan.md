@@ -40,7 +40,7 @@ De websites zijn daarna de uitkomstmeting, niet het doel.
 | flex-wrap op maat | items met een eigen breedte (`calc(50% - 24px)` + marges — NRC) bepalen zelf hoeveel er per rij passen; de celwortel resolvet zijn width niet nóg eens | `flex-calc` |
 | invoervelden | de site-CSS bepaalt de veldbreedte (wikipedia's 100%-zoekbalk); standaard blijft rand + wit vlak | `invoer` |
 | randen | border-dikte (`3px` = geneste lijnen) en zijranden (`border-left: 6px solid` — meldingen, tabs) als gekleurde stroken; `transparent` is een ónzichtbare rand, geen grijze lijn | `randen` |
-| svg | inline `<svg>`, `<img src="*.svg">` en svg-iconen gerasterd (oksvg, puur Go); maten per spec: CSS > attributen > default object size (300×150 op verhouding); `preserveAspectRatio` (default meet): passend in de doos, niet uitgerekt | `svg`, `svg-maten` |
+| svg | inline `<svg>`, `<img src="*.svg">` en svg-iconen gerasterd (tdewolff/canvas sinds 22-07 — echte gradients, strokes, transforms én `<text>`; puur Go, door de tamago-gate); maten per spec: CSS > attributen > default object size (300×150 op verhouding); `preserveAspectRatio` (default meet): passend in de doos, niet uitgerekt — ook als de host-doos een ándere verhouding heeft dan de symbol-viewBox (het NRC-patroon) | `svg`, `svg-maten`, `pasvorm` |
 | off-canvas | `transform: translate(-100%…)` is een dichte lade; de −50%-centreertruc blijft staan | `verbergen` |
 | absolute procenten | `right`/`left`-% tegen de containing-block-breedte, `top`/`bottom`-% tegen zijn gedeclareerde hoogte; ankers en `position` mogen in verschillende regels staan; de origin volgt `width` + `margin: 0 auto`-centrering; `height` reserveert ruimte, ook op kale containers en spacers — wikipedia's talencirkel rendert | `wikipedia-cirkel` |
 | rem-basis | `html { font-size: 62.5% }` maakt 1rem = 10px: alle rem/em-maten rekenen tegen de wortel-lettergrootte | `wikipedia-kop` |
@@ -55,12 +55,23 @@ De websites zijn daarna de uitkomstmeting, niet het doel.
 | tweakers-kop | de échte tweakers-menubalk, integraal: `:is()` mét combinators herschreven naar cascadia-taal (`.more:is(:is(twk-site-menu>menu)>li)>.dropdown-menu` — de dropdowns zijn nu echt dicht); de fixed balk ontsnapt aan de gecentreerde pagina-rail (viewport = containing block, volle breedte); verborgen kinderen zijn geen flex-items (hamburger, sr-kop); zonder `flex-wrap` is nowrap de default — een menubalk met veel linkjes blijft één regel; `margin-inline`/`padding-inline`/`-block`; `margin-inline: auto` in een rij centreert (half duwen) | `tweakers-kop` |
 | stipjes | een leeg element mét eigen maat en achtergrond ís het vlak — carrousel-stipjes, statuslampjes; losse vlakjes smelten niet samen tot een balk | `stipjes` |
 | afgerond | `border-radius`: vlakken en randen met ronde hoeken (px, `50%` = helemaal rond, pil-waarden klemmen op de halve maat); op een `<img>` worden de hoeken doorzichtig — de ronde avatar | `afgerond` |
-| sprite-vel | wikipedia's geneste sprite-sheet: sub-`<svg id>`'s apart gerasterd en op hun x/y samengelegd (oksvg zou er één klodder van maken); `background-position: 0 0` op een gróter vel is een crop; de gradient-vóór-de-url-fallback laat de url winnen — het wordmark en de zusterlogo's renderen | `sprite-vel` |
+| sprite-vel | wikipedia's geneste sprite-sheet: sub-`<svg id>`'s apart gerasterd en op hun x/y samengelegd (geneste svg's met een y-offset kan ook canvas niet — de composiet blijft nodig); `background-position: 0 0` op een gróter vel is een crop; de gradient-vóór-de-url-fallback laat de url winnen — het wordmark en de zusterlogo's renderen | `sprite-vel` |
 | logo-naam | zonder JS blijft een `<twk-icon>` leeg: een leeg element met `role="img"` + `aria-label` rendert zijn label (het alt-principe); het logo-slot blijft alléén het site-icoon — geen verzonnen naam ernaast, het echte wordmark bevat de merknaam zelf | `logo-naam` |
 | reuzefoto's | spaties in URL's worden ge-encodeerd zoals elke browser doet ("waarom 1.webp"); de decode-grens is een píekbudget per formaat (jpeg/webp ~2 B/px, png 4) i.p.v. een zijde-cap — 24-megapixel-webp's laden en worden meteen teruggeschaald naar ≤2048/zijde (easyflorist) | `TestReuzefotoEnSpatie` |
 | centreren in vakken | `text-align` erft gewoon dóór een absoluut gepositioneerd vak in — wikipedia's `.central-featured` centreert zo de tekst in zijn talenvakken | `wikipedia-cirkel` |
 | flex op de bodem | een flex-item zónder maat en zonder grow is content-sized (grow ís per spec 0): de kolommen komen uit een méétpas, en justify-content heeft echte vrije ruimte te verdelen — easyflorists space-between-header zet de knoppen uiterst rechts; bij space-between/end raakt het laatste item de containerrand; grow-mix: vast + `flex: 1` + content werkt door elkaar | `flex-bodem` |
 | grid op de bodem | `grid-template-areas`: benoemde gebieden — rijen letterlijk uit de template, kolomspans uit naam-herhaling (holy grail: kop/zij/hoofd/voet); `justify-items`/`justify-self`: het item krimpt naar zijn inhoud en staat midden of tegen de celrand; rowspans en gaten vallen eerlijk terug op stapelen | `grid-bodem` |
+| gestylede invoer | de site-CSS kleedt velden en knoppen aan: achtergrond, tekstkleur, rand, `border-radius` (de pil-knop!), `height`/padding; het `placeholder`-attribuut toont grijs tot er getikt wordt; zonder CSS blijft de UA-default | `invoer-stijl` |
+| @import | sheets die sheets laden bestaan echt: de import wordt op zijn plek ingelijmd (relatief opgelost tegen de importerende sheet, recursief binnen het budget), een mediaconditie wordt een omhullend `@media`-blok, `supports(...)` evalueert mee | `sheet-import` |
+| @supports | de conditie evalueert tegen `supportedProp` — dezelfde waarheid als de regel-filter, geen tweede lijst; `and`/`or`/`not` en geneste haakjes; onbekende vormen (`selector(...)`) zijn niet waar, net als in een browser die ze niet kent | `supports` |
+| inherit + currentColor | `inherit` is letterlijk "wat de stijl-struct al meedraagt" (de declaratie vervalt — `color: inherit` op links, `text-align: inherit`); `currentColor` wordt de cascade-kleur zodra die bekend is: randen, vlakken én `fill` op inline svg's | `erf-kleur` |
+| box-sizing | onze `width` rekent van nature als border-box — het vlak ís de gedeclareerde maat, padding zit erbinnen; precies wat `*{box-sizing:border-box}` van het moderne web vraagt (gratis vinkje, nu bewaakt) | `doosmaat` |
+| de regel-kap | `-webkit-line-clamp: N` kapt na N regels met `...`; `white-space:nowrap` + `text-overflow:ellipsis` is de éénregel-variant — teaser-kaarten lopen niet meer vol | `regel-klem` |
+| vensterunits | `vw`/`vh` (en `dvh`/`svh`/`lvh`) als gewone lengtes: tegen de layoutbreedte en de vensterhoogte — hero's van `50vh` zijn echt half venster | `venster-maten` |
+| line-height | de leesbaarheidsknop: een kale factor of procent × de regelhoogte, een lengte tegen de gedeclareerde font-size — geklemd op [1, 16] px interlinie; de ruimste tekst op de regel wint | `regelhoogte` |
+| het HTML-strootje | de UA-sheet dekt `blockquote` (inspringing + balkje), `s`/`del` (line-through — de oude prijs!), `ins`/`u`, `sub`/`sup` (klein + offset onder/boven de regel), `dl`/`dd`, `kbd` (toets-chip); alleen het middenstreepje en de offset waren engine-werk | `ua-elementen` |
+| tabel-rowspan | een `rowspan` bezet zijn kolom ook in de rijen eronder: de cel staat één keer, de kolommen eronder blijven leeg maar de uitlijning klopt | `rijspan` |
+| celmidden + lagen | `vertical-align: top/middle/bottom` is de tabel-taal voor align-items — per cel vertaald; `z-index` sorteert de late (absolute) schilderlaag stabiel, dus gelijke z blijft bronvolgorde | `celmidden-lagen` |
 
 ## 2. Zo tonen we aan dat het klopt
 
@@ -91,8 +102,13 @@ De woordenlijst (alles meet op de gelayoute pagina): `zichtbaar`/`verborgen`,
 stipjes), `rond` (het vlak heeft een hoekstraal), `rondeplaat W H` (de
 afbeelding heeft doorzichtige hoeken), `geenrand`, `pasplaat W H`
 (passend gemaakt, niet uitgerekt: hoek doorzichtig, midden dekkend),
-`hmidden` (tekst horizontaal in het midden van zijn vlak), en de
-richtlijn `breedte N` (schakelt de framebreedte).
+`hmidden` (tekst horizontaal in het midden van zijn vlak),
+`veldkleur`/`veldrond`/`veldhoog`/`veldkaal` (de stijl van een veld, op
+zijn name-attribuut), `randkleur` (de rand van het vlak in precies deze
+kleur), `doorgestreept`, `lager`/`hoger` (sub/sup-offset op de regel),
+`zelfdekolom` (kolomuitlijning — rowspan), `regelafstand a b min max`
+(de line-height-pitch tussen twee regelstarts), en de richtlijn
+`breedte N` (schakelt de framebreedte).
 
 ## 3. De gaten, op volgorde van web-gebruik
 
@@ -113,6 +129,16 @@ hints, en de margin/padding-longhand-cascade. Kanttekening: tweakers'
 eigen site-logo (`<twk-icon>`) blijft leeg over de lijn — hun JS hangt de
 `<svg><use>` er pas client-side in; het logo-slot (site-icoon) blijft daar
 de eerlijke weergave. Elke server-gerenderde `<use>` doet het wél.
+
+Ook gedicht op 22-07 (de sloterlijst): de stille regel-verliezers
+(`@import`, `@supports`, `inherit`/`currentColor`), de zichtbare laag
+(line-clamp/ellipsis, `vw`/`vh`, `line-height`, box-sizing-check) en de
+UA-stylesheet-ronde met line-through, sub/sup, tabel-rowspan,
+`vertical-align` en `z-index` — zie de laatste elf rijen van §1.
+
+Bewust overgeslagen: transitions/animations/transform (op de
+offcanvas-translate-detectie na), box-shadow, letter-spacing, cursor —
+dat is het web dat beweegt, en wij zijn het web dat leest.
 
 ## 4. Werkwijze per gat
 

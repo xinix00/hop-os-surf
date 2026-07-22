@@ -1,0 +1,14 @@
+<!doctype html>
+<html><head><style>
+  .doos { width: 220px; padding: 16px; border: 1px solid #8899aa; background-color: #eef2f8 }
+</style></head><body>
+<div class="doos">binnenin</div>
+</body></html>
+<script type="text/x-expect">
+# box-sizing: onze width is de-facto border-box - het vlak is de
+# gedeclareerde 220px en de padding zit erbinnen (het *{border-box}-web)
+vlakbreedte binnenin 220
+vlakx binnenin 6
+# de padding duwt de tekst van de rand af
+ingesprongen binnenin
+</script>

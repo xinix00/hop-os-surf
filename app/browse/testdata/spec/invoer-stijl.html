@@ -1,0 +1,24 @@
+<!doctype html>
+<html><head><style>
+  .zoek { background-color: #f6f6f0; border: 1px solid #8899aa; border-radius: 18px;
+          width: 220px; height: 36px; color: #223344; }
+  .actie { background-color: #e0525e; color: #ffffff; border: 1px solid #e0525e; border-radius: 20px; }
+</style></head><body>
+<form action="/zoek">
+  <p><input class="zoek" type="search" name="q" placeholder="Zoek een artikel"></p>
+  <p><input class="actie" type="submit" name="go" value="Zoek nu"></p>
+  <p><input type="text" name="kaal" size="10"></p>
+</form>
+</body></html>
+<script type="text/x-expect">
+# de site-CSS kleedt het veld aan: achtergrond, rand, hoekstraal, hoogte
+veldkleur "q" #f6f6f0
+veldrond "q"
+veldhoog "q" 36
+veldbreedte "q" 220
+# de verzendknop in de merkkleur, als pil
+veldkleur "go" #e0525e
+veldrond "go"
+# zonder CSS blijft de UA-default: wit veld, gewone rand
+veldkaal "kaal"
+</script>

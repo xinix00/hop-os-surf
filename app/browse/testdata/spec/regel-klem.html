@@ -1,0 +1,21 @@
+<!doctype html>
+<html><head><style>
+  .klem { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden }
+  .strook { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; width: 220px }
+</style></head><body>
+<p class="klem">eerste alfa bravo charlie delta echo foxtrot golf hotel india juliett kilo lima
+mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu einde</p>
+<p>daarna</p>
+<p class="strook">strak begint hier en loopt daarna nog heel lang door tot ver voorbij de rand</p>
+</body></html>
+<script type="text/x-expect">
+# -webkit-line-clamp: 2 - de eerste regels blijven, de rest vervalt
+zichtbaar "eerste alfa"
+verborgen einde
+zichtbaar "..."
+# de flow gaat gewoon verder onder het geklemde blok
+onder daarna "eerste alfa"
+# text-overflow: ellipsis + nowrap is de eenregel-variant
+zichtbaar "strak begint"
+verborgen voorbij
+</script>

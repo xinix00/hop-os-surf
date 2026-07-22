@@ -1,0 +1,18 @@
+<!doctype html>
+<html><head><style>
+  .hero { height: 50vh; background-color: #22aa44; color: #ffffff }
+  .half { width: 50vw; background-color: #2244cc; color: #ffffff }
+  .modern { min-height: 20dvh; background-color: #6a2a8a; color: #ffffff }
+</style></head><body>
+<div class="hero">held</div>
+<div class="half">helft</div>
+<div class="modern">vers</div>
+</body></html>
+<script type="text/x-expect">
+# 50vh van het 600px-venster: een hero van 300px hoog
+vlakhoogte held 300
+# 50vw van de 480px-layout: 240px breed
+vlakbreedte helft 240
+# de dynamische varianten (dvh) zijn hetzelfde venster: 120px
+vlakhoogte vers 120
+</script>

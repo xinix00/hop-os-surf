@@ -88,6 +88,10 @@ const (
 // dezelfde cap die cssMinExtent al hanteerde.
 var viewH = 600
 
+// viewW is de layoutbreedte van de laatste layout — de basis voor
+// vw-eenheden. layoutStyled zet hem per pagina (net als remPx).
+var viewW = 480
+
 // Box is één gelayoute tekstrun, afbeelding of <hr>-lijn in document-
 // coördinaten: (0,0) is de top van de pagina, los van scroll en adresbalk.
 type Box struct {
@@ -101,6 +105,8 @@ type Box struct {
 	Tile   *image.RGBA // background-image: herhaald over R (tegels — nooit een reuze-alloc)
 	Bold   bool        // pseudo-vet (dubbelgetekend)
 	Under  bool        // onderstreept (text-decoration; de UA-default voor links)
+	Strike bool        // doorgestreept (line-through — de oude prijs)
+	Z      int         // z-index: sorteersleutel van de late (absolute) laag
 	BG     color.RGBA  // achtergrondvlak achter de run (of het blok)
 	HasBG  bool
 	Border color.RGBA // blokrand (kaarten, panelen)
@@ -148,6 +154,8 @@ type style struct {
 	pre      bool
 	bold     bool   // pseudo-vet: glyph dubbel getekend met 1px offset
 	under    bool   // onderstreept (text-decoration door de cascade)
+	strike   bool   // doorgestreept (text-decoration: line-through — prijzen!)
+	rise     int    // verticale offset t.o.v. de regel (sub/sup)
 	xform    string // text-transform: uppercase/lowercase/capitalize
 	center   bool   // text-align:center / <center>
 	right    bool   // text-align:right — prijzen, datums
@@ -155,6 +163,7 @@ type style struct {
 	list     *int   // de teller van de omvattende <ol>
 	inline   bool   // in een flex/inline-context: blokken breken hier niet
 	blockify bool   // direct kind van een grid/flex-kolom: word een blok (ook een <a>)
+	lead     int    // line-height als interlinie in px (0 = de default van 4)
 	rad      int    // border-radius voor vervangen inhoud (ronde avatars) — niet geërfd, per element gezet
 	rIndent  int    // inspringing vanaf rechts (marges/padding van blokken)
 	bg       color.RGBA
@@ -182,8 +191,9 @@ type layouter struct {
 	imgs   map[string]image.Image
 	styles map[*html.Node]props
 	edits  map[*html.Node]string // door de gebruiker ingetikte veldwaarden
-	line0  int                   // index van de eerste box op de huidige regel (voor centreren)
-	center bool                  // deze regel centreren bij breakLine
+	line0    int                 // index van de eerste box op de huidige regel (voor centreren)
+	lineLead int                 // interlinie van de huidige regel (line-height; 0 = default)
+	center   bool                // deze regel centreren bij breakLine
 	right  bool                  // deze regel rechts uitlijnen bij breakLine
 	lineR  int                   // rechterrand van de uit te lijnen regel (0 = paginabreed)
 	fL, fR flt                   // actieve floats links en rechts
@@ -301,6 +311,7 @@ func LayoutWithImages(body *html.Node, width int, imgs map[string]image.Image) P
 func layoutStyled(body *html.Node, width int, imgs map[string]image.Image, styles map[*html.Node]props, edits map[*html.Node]string, icon image.Image) Page {
 	// De rem-basis van deze pagina: html { font-size } (62.5% = 10px).
 	remPx = 16
+	viewW = width
 	if body != nil && body.Parent != nil && styles != nil {
 		if v, ok := styles[body.Parent]["font-size"]; ok {
 			remPx = rootFontPx(v)
@@ -315,7 +326,10 @@ func layoutStyled(body *html.Node, width int, imgs map[string]image.Image, style
 	// containing block is de pagina — die onderkant is er nu.
 	l.flushAbs(-1, l.y)
 	p := Page{Boxes: merge(l.boxes), Fields: l.fields, Height: l.y, BG: l.pageBG, HasBG: l.hasPageBG}
-	// Absolute boxes schilderen bovenop de flow (paint-volgorde: laatst).
+	// Absolute boxes schilderen bovenop de flow (paint-volgorde: laatst),
+	// onderling gesorteerd op z-index — stabiel, dus gelijke z blijft
+	// bronvolgorde (het schildermechanisme bestond al, dit is de sortering).
+	sort.SliceStable(l.late, func(i, j int) bool { return l.late[i].Z < l.late[j].Z })
 	for _, b := range l.late {
 		p.Boxes = append(p.Boxes, b)
 		if b.R.Max.Y > p.Height {
@@ -326,6 +340,12 @@ func layoutStyled(body *html.Node, width int, imgs map[string]image.Image, style
 		p.PinY0, p.PinY1 = l.pin.y0, l.pin.y1
 	}
 	return p
+}
+
+// hexCSS: een kleur terug naar CSS-hex — de invulling voor currentColor.
+func hexCSS(c color.RGBA) string {
+	const hx = "0123456789abcdef"
+	return string([]byte{'#', hx[c.R>>4], hx[c.R&15], hx[c.G>>4], hx[c.G&15], hx[c.B>>4], hx[c.B&15]})
 }
 
 // luma: waargenomen helderheid 0..255 (ITU-R BT.601) — kiest tekstkleuren
@@ -355,7 +375,7 @@ var uaProps = map[string]props{
 	"strong":     {"font-weight": "bold"},
 	"th":         {"font-weight": "bold", "text-align": "center"},
 	"code":       {"color": "#6a2a8a"},
-	"kbd":        {"color": "#6a2a8a"},
+	"kbd":        {"color": "#6a2a8a", "background-color": "#e2e6ee", "border": "1px solid #b0b0b8"},
 	"samp":       {"color": "#6a2a8a"},
 	"pre":        {"color": "#6a2a8a", "white-space": "pre"},
 	"mark":       {"background-color": "gold"},
@@ -363,9 +383,16 @@ var uaProps = map[string]props{
 	"summary":    {"font-weight": "bold"},
 	"ul":         {"padding-left": "16px"},
 	"ol":         {"padding-left": "16px"},
-	"blockquote": {"padding-left": "16px"},
+	"blockquote": {"padding-left": "16px", "border-left": "3px solid #b0b0b8"},
 	"dd":         {"padding-left": "16px"},
 	"button":     {"background-color": "#e2e6ee"},
+	"s":          {"text-decoration": "line-through"},
+	"del":        {"text-decoration": "line-through"},
+	"strike":     {"text-decoration": "line-through"},
+	"ins":        {"text-decoration": "underline"},
+	"u":          {"text-decoration": "underline"},
+	"sub":        {"font-size": "small"},
+	"sup":        {"font-size": "small"},
 }
 
 // blocks: elementen die een eigen regel (en marge) afdwingen.
@@ -528,6 +555,16 @@ func (l *layouter) element(el *html.Node, st style) {
 	if fl := cp["float"]; (fl == "left" || fl == "right") && tag != "img" &&
 		el != l.rootEl && el != l.absEl && cp["position"] != "absolute" && cp["position"] != "fixed" {
 		if l.floatBlock(el, cp, st, fl == "right") {
+			return
+		}
+	}
+	// De regel-kap: -webkit-line-clamp N (teaser-kaarten) of nowrap +
+	// text-overflow:ellipsis (éénregel-titels). Zonder kap lopen de kaarten
+	// vol en staat elke kolommen-balans scheef — precies wat de site met de
+	// clamp voorkómt.
+	if n := clampLines(cp); n > 0 && el != l.rootEl && el != l.absEl && !st.inline &&
+		cp["position"] != "absolute" && cp["position"] != "fixed" {
+		if l.clampBlock(el, cp, st, n) {
 			return
 		}
 	}
@@ -705,6 +742,31 @@ func (l *layouter) element(el *html.Node, st style) {
 			st.col = c
 		}
 	}
+	// inherit en currentColor: inherit is bij ons letterlijk "wat de
+	// stijl-struct al meedraagt" — de declaratie vervalt (anders leest hij
+	// als onbegrepen waarde en reset hij naar een default, text-align
+	// voorop); currentColor wordt de cascade-kleur, die is nu net bekend.
+	// Kopie-bij-schrijven: cp deelt met de stylecache.
+	norm := false
+	for _, v := range cp {
+		if v == "inherit" || strings.Contains(v, "currentcolor") {
+			norm = true
+			break
+		}
+	}
+	if norm {
+		clone := make(props, len(cp))
+		for k, v := range cp {
+			switch {
+			case v == "inherit":
+			case strings.Contains(v, "currentcolor"):
+				clone[k] = strings.ReplaceAll(v, "currentcolor", hexCSS(st.col))
+			default:
+				clone[k] = v
+			}
+		}
+		cp = clone
+	}
 	if v, ok := cp["background-color"]; ok {
 		if c, ok := cssColor(v); ok {
 			st.bg, st.hasBG = c, true
@@ -732,11 +794,24 @@ func (l *layouter) element(el *html.Node, st style) {
 	if v, ok := cp["white-space"]; ok {
 		st.pre = v == "pre"
 	}
+	if v, ok := cp["line-height"]; ok {
+		st.lead = leadFor(v, st.scale, cp)
+	}
 	if v, ok := cp["text-decoration"]; ok {
 		st.under = strings.Contains(v, "underline")
+		st.strike = strings.Contains(v, "line-through")
 	}
 	if v, ok := cp["text-decoration-line"]; ok {
 		st.under = strings.Contains(v, "underline")
+		st.strike = strings.Contains(v, "line-through")
+	}
+	// sub/sup: dezelfde regel, maar de tekst hangt ónder respectievelijk
+	// bóven de basis — voetnoten en formules. De maat komt uit de UA-sheet.
+	switch tag {
+	case "sup":
+		st.rise = -3
+	case "sub":
+		st.rise = 2
 	}
 	if v, ok := cp["text-transform"]; ok {
 		st.xform = v
@@ -1614,10 +1689,13 @@ func (l *layouter) columnPlan(el *html.Node, cp props, st style, tag string) ([]
 	switch {
 	case tag == "table":
 		// Rijen van td/th-cellen; colspan telt mee in de kolomtelling en
-		// geeft de cel de breedte van zijn overspannen kolommen.
+		// geeft de cel de breedte van zijn overspannen kolommen; rowspan
+		// bezet zijn kolom óók in de rijen eronder (de cel staat één keer,
+		// de kolommen eronder blijven leeg maar de uitlijning klopt).
 		type trow struct {
 			cells []*html.Node
 			spans []int
+			rspan []int
 		}
 		var rows []trow
 		ncol := 0
@@ -1628,14 +1706,20 @@ func (l *layouter) columnPlan(el *html.Node, cp props, st style, tag string) ([]
 				total := 0
 				for c := n.FirstChild; c != nil; c = c.NextSibling {
 					if c.Type == html.ElementNode && (c.Data == "td" || c.Data == "th") {
-						s := 1
+						s, rs := 1, 1
 						if v, ok := attr(c, "colspan"); ok {
 							if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 1 && n <= 6 {
 								s = n
 							}
 						}
+						if v, ok := attr(c, "rowspan"); ok {
+							if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n > 1 && n <= 6 {
+								rs = n
+							}
+						}
 						row.cells = append(row.cells, c)
 						row.spans = append(row.spans, s)
+						row.rspan = append(row.rspan, rs)
 						total += s
 					}
 				}
@@ -1694,19 +1778,38 @@ func (l *layouter) columnPlan(el *html.Node, cp props, st style, tag string) ([]
 		}
 		if base != nil {
 			out := make([]colRow, len(rows))
+			carry := make([]int, ncol) // resterende rowspan per kolom
 			for i, r := range rows {
-				cr := colRow{cells: r.cells, gap: -1}
-				t := 0
-				for _, s := range r.spans {
+				cr := colRow{gap: -1}
+				t, ci := 0, 0
+				for t < ncol {
+					if carry[t] > 0 {
+						// Bezet door een rowspan van hierboven: een lege cel
+						// houdt de kolom open, de rest lijnt gewoon uit.
+						carry[t]--
+						cr.cells = append(cr.cells, nil)
+						cr.w = append(cr.w, base[t])
+						t++
+						continue
+					}
+					if ci >= len(r.cells) {
+						break
+					}
+					s := r.spans[ci]
 					if s > ncol-t {
 						s = ncol - t
 					}
 					w := gap * (s - 1)
 					for k := 0; k < s; k++ {
 						w += base[t+k]
+						if r.rspan[ci] > 1 {
+							carry[t+k] = r.rspan[ci] - 1
+						}
 					}
+					cr.cells = append(cr.cells, r.cells[ci])
 					cr.w = append(cr.w, w)
 					t += s
+					ci++
 				}
 				out[i] = cr
 			}
@@ -2059,6 +2162,9 @@ func (l *layouter) columns(cells []*html.Node, colW []int, gap int, st style, jc
 	subs := make([]*layouter, len(cells))
 	maxH, minH := 0, 1<<30
 	for i, cell := range cells {
+		if cell == nil {
+			continue // een rowspan-gat: de kolom blijft open maar leeg
+		}
 		sub := l.subLayout(cell, colW[i%len(colW)], st, false)
 		subs[i] = sub
 		if sub.y > maxH {
@@ -2105,9 +2211,22 @@ func (l *layouter) columns(cells []*html.Node, colW []int, gap int, st style, jc
 	y0 := l.y
 	cx := x0
 	for i, sub := range subs {
+		if sub == nil {
+			cx += colW[i%len(colW)] + gap
+			continue
+		}
 		// align-items (align-self van de cel wint): waar hangt een lagere
 		// cel in de rij? De default (stretch) rekt zijn kaartvlak op.
+		// vertical-align is de tabel-taal voor hetzelfde (cellen!).
 		a := ai
+		switch l.propsOf(cells[i])["vertical-align"] {
+		case "middle":
+			a = "center"
+		case "bottom":
+			a = "flex-end"
+		case "top":
+			a = "start"
+		}
 		if v, ok := l.propsOf(cells[i])["align-self"]; ok && v != "auto" {
 			a = v
 		}
@@ -2159,6 +2278,72 @@ func (l *layouter) columns(cells []*html.Node, colW []int, gap int, st style, jc
 	l.y = y0 + maxH
 	l.x, l.lineH, l.space = 0, 0, false
 	l.line0 = len(l.boxes)
+	return true
+}
+
+// clampBlock legt een blok met een regelbudget: de inhoud in een
+// sub-layout, na N regels afgekapt met "..." — de teaser-kap. Past de
+// inhoud binnen het budget, dan is er niets te doen (false: de gewone
+// flow neemt het over, inclusief marges en decoratie).
+func (l *layouter) clampBlock(el *html.Node, cp props, st style, lines int) bool {
+	availW := l.lineRight(st.rIndent) - l.lineLeft(st.indent)
+	if v, ok := cssLenPct(cp["width"], availW); ok && v >= 64 && v < availW {
+		availW = v
+	}
+	if availW < 64 {
+		return false
+	}
+	sub := l.subLayout(el, availW, st, false)
+	// De regelstarts van de tekst; alles vanaf regel N+1 vervalt.
+	var starts []int
+	seen := map[int]bool{}
+	for _, b := range sub.boxes {
+		if b.Text != "" && !seen[b.R.Min.Y] {
+			seen[b.R.Min.Y] = true
+			starts = append(starts, b.R.Min.Y)
+		}
+	}
+	if len(starts) <= lines {
+		return false // past al: geen kap nodig
+	}
+	sort.Ints(starts)
+	cut := starts[lines]
+	kept := sub.boxes[:0]
+	for _, b := range sub.boxes {
+		if b.R.Min.Y >= cut {
+			continue
+		}
+		if b.R.Max.Y > cut {
+			b.R.Max.Y = cut // een vlak dat doorliep kapt mee af
+		}
+		kept = append(kept, b)
+	}
+	sub.boxes = kept
+	// Het beletselteken aan het einde van de laatste zichtbare regel.
+	var last *Box
+	for i := range sub.boxes {
+		if b := &sub.boxes[i]; b.Text != "" && b.R.Min.Y == starts[lines-1] {
+			last = b
+		}
+	}
+	if last != nil {
+		w := textW("...", last.Scale)
+		x0 := last.R.Max.X + charW(last.Scale)
+		if x0+w > availW-pad {
+			x0 = availW - pad - w
+		}
+		sub.boxes = append(sub.boxes, Box{
+			R:     image.Rect(x0, last.R.Min.Y, x0+w, last.R.Max.Y),
+			Text:  "...", Scale: last.Scale, Col: last.Col, Href: last.Href,
+		})
+	}
+	sub.y = cut
+	l.breakLine()
+	l.blockGap(blockMargin(el.Data, st.scale))
+	l.flushGap()
+	l.adopt(sub, image.Pt(l.lineLeft(st.indent)-pad, l.y), false)
+	l.y += sub.y
+	l.blockGap(blockMargin(el.Data, st.scale))
 	return true
 }
 
@@ -2226,6 +2411,7 @@ func (l *layouter) input(el *html.Node, st style) {
 // (default 20 tekens), knopbreedte het label.
 func (l *layouter) widget(el *html.Node, val string, submit bool, st style) {
 	l.flushGap()
+	cp := l.propsOf(el)
 	chars := 20
 	if submit {
 		chars = len(val) + 2
@@ -2238,13 +2424,19 @@ func (l *layouter) widget(el *html.Node, val string, submit bool, st style) {
 	max := l.lineRight(st.rIndent) - l.lineLeft(st.indent)
 	// De site-CSS bepaalt de veldbreedte als hij dat wil (wikipedia's
 	// zoekbalk: width 100%); anders het size-attribuut.
-	if v, ok := cssLenPct(l.propsOf(el)["width"], max); ok && v >= 40 {
+	if v, ok := cssLenPct(cp["width"], max); ok && v >= 40 {
 		w = v
 	}
 	if w > max {
 		w = max
 	}
+	// ... en de hoogte: height, of padding om de tekstregel heen.
 	h := charH(st.scale) + 8
+	if v, ok := cssLen(cp["height"]); ok && v >= charH(st.scale) {
+		h = v
+	} else if pd := cssEdgesOf(cp, "padding", 48); pd.setV {
+		h = charH(st.scale) + pd.t + pd.b + 2
+	}
 	sp := 0
 	if l.space && l.x > 0 {
 		sp = charW(st.scale)
@@ -2260,7 +2452,19 @@ func (l *layouter) widget(el *html.Node, val string, submit bool, st style) {
 	r := image.Rect(x, l.y, x+w, l.y+h)
 	name, _ := attr(el, "name")
 	l.fields = append(l.fields, Field{R: r, Name: name, Value: val, Submit: submit, node: el})
-	l.boxes = append(l.boxes, Box{R: r, Scale: st.scale, Field: len(l.fields)})
+	// De site-CSS kleedt het veld aan (zoekbalken, merk-knoppen); wat er
+	// niet staat, vult renderField met de UA-default (wit veld, knopgrijs).
+	box := Box{R: r, Scale: st.scale, Field: len(l.fields), Rad: cssRadius(cp["border-radius"])}
+	if c, ok := cssColor(cp["background-color"]); ok {
+		box.BG, box.HasBG = c, true
+	}
+	if c, bw, on := cssBorder(cp["border"]); on {
+		box.Border, box.BrdW, box.HasBrd = c, bw, true
+	}
+	if c, ok := cssColor(cp["color"]); ok {
+		box.Col = c
+	}
+	l.boxes = append(l.boxes, box)
 	l.x = x + w
 	if h > l.lineH {
 		l.lineH = h
@@ -2390,20 +2594,35 @@ func (l *layouter) word(w string, st style) {
 		}
 	}
 	x := l.x + sp
+	// sub/sup: de verticale offset t.o.v. de regelbasis (nooit boven de
+	// paginarand uit).
+	y := l.y + st.rise
+	if y < 0 {
+		y = 0
+	}
 	l.boxes = append(l.boxes, Box{
-		R:     image.Rect(x, l.y, x+ww, l.y+charH(st.scale)),
-		Text:  w,
-		Scale: st.scale,
-		Col:   st.col,
-		Href:  st.href,
-		Bold:  st.bold,
-		Under: st.under,
-		BG:    st.bg,
-		HasBG: st.hasBG,
+		R:      image.Rect(x, y, x+ww, y+charH(st.scale)),
+		Text:   w,
+		Scale:  st.scale,
+		Col:    st.col,
+		Href:   st.href,
+		Bold:   st.bold,
+		Under:  st.under,
+		Strike: st.strike,
+		BG:     st.bg,
+		HasBG:  st.hasBG,
 	})
 	l.x = x + ww
 	if h := charH(st.scale); h > l.lineH {
 		l.lineH = h
+	}
+	// line-height: de ruimste tekst op de regel bepaalt de interlinie.
+	eff := lead
+	if st.lead > 0 {
+		eff = st.lead
+	}
+	if eff > l.lineLead {
+		l.lineLead = eff
 	}
 	l.space = false
 	l.alignLine(st)
@@ -2714,7 +2933,15 @@ func (l *layouter) absoluteAt(el *html.Node, cp props, st style, containerBottom
 	if y < 0 {
 		y = 0
 	}
+	n0 := len(l.late)
 	l.adopt(sub, image.Pt(x-uMin, y), true)
+	// z-index: de sorteersleutel van de late laag — layoutStyled sorteert
+	// stabiel, dus zonder declaratie blijft het bronvolgorde.
+	if z, err := strconv.Atoi(strings.TrimSpace(cp["z-index"])); err == nil {
+		for i := n0; i < len(l.late); i++ {
+			l.late[i].Z = z
+		}
+	}
 }
 
 // subLayout legt een element in zijn eigen mini-layouter van breedte w —
@@ -2949,12 +3176,13 @@ func (l *layouter) preText(txt string, st style) {
 		}
 		ww := textW(line, st.scale)
 		l.boxes = append(l.boxes, Box{
-			R:     image.Rect(l.x, l.y, l.x+ww, l.y+charH(st.scale)),
-			Text:  line,
-			Scale: st.scale,
-			Col:   st.col,
-			Href:  st.href,
-			Under: st.under,
+			R:      image.Rect(l.x, l.y, l.x+ww, l.y+charH(st.scale)),
+			Text:   line,
+			Scale:  st.scale,
+			Col:    st.col,
+			Href:   st.href,
+			Under:  st.under,
+			Strike: st.strike,
 		})
 		l.x += ww
 		if h := charH(st.scale); h > l.lineH {
@@ -2993,8 +3221,13 @@ func (l *layouter) breakLine() {
 			}
 		}
 	}
-	l.y += l.lineH + lead
-	l.x, l.lineH = 0, 0
+	// line-height: de regel-eigen interlinie (0 = de vaste default).
+	ll := l.lineLead
+	if ll == 0 {
+		ll = lead
+	}
+	l.y += l.lineH + ll
+	l.x, l.lineH, l.lineLead = 0, 0, 0
 	l.space = false
 	l.line0 = len(l.boxes)
 	l.center = false
@@ -3046,7 +3279,7 @@ func merge(in []Box) []Box {
 			if p.Text != "" && b.Text != "" && !p.Rule && !b.Rule && p.Img == nil && b.Img == nil &&
 				p.Field == 0 && b.Field == 0 && p.Tile == nil && b.Tile == nil &&
 				p.Scale == b.Scale && p.Col == b.Col && p.Href == b.Href &&
-				p.Bold == b.Bold && p.Under == b.Under &&
+				p.Bold == b.Bold && p.Under == b.Under && p.Strike == b.Strike &&
 				p.HasBG == b.HasBG && p.BG == b.BG &&
 				p.Pin == b.Pin &&
 				p.R.Min.Y == b.R.Min.Y && p.R.Max.X+charW(p.Scale) == b.R.Min.X {
@@ -3283,6 +3516,11 @@ func (v *View) drawBox(img *image.RGBA, bx *Box, top, bot int) {
 		// de site aan of uit te zetten — geen hardgekoppelde href-streep.
 		pixel.Fill(img, image.Rect(b.Min.X+bx.R.Min.X, bot, b.Min.X+bx.R.Max.X, bot+1), bx.Col)
 	}
+	if bx.Strike {
+		// line-through: hetzelfde streepje, maar middendoor — de oude prijs.
+		mid := (top + bot) / 2
+		pixel.Fill(img, image.Rect(b.Min.X+bx.R.Min.X, mid, b.Min.X+bx.R.Max.X, mid+1), bx.Col)
+	}
 }
 
 // renderScrollbar tekent een smalle positie-indicator aan de rechterrand —
@@ -3309,16 +3547,34 @@ func (v *View) renderField(img *image.RGBA, bx *Box, top, bot int) {
 	f := &v.Page.Fields[bx.Field-1]
 	b := img.Bounds()
 	r := image.Rect(b.Min.X+bx.R.Min.X, top, b.Min.X+bx.R.Max.X, bot)
-	face, edge := colFieldBG, colRule
+	// De site-stijl uit de box; de UA-default vult de gaten.
+	face, edge, ink := colFieldBG, colRule, colText
 	if f.Submit {
 		face = colBtnFace
+	}
+	if bx.HasBG {
+		face = bx.BG
+	}
+	if bx.HasBrd {
+		edge = bx.Border
+	}
+	if bx.Col != (color.RGBA{}) {
+		ink = bx.Col
 	}
 	if v.Focus == bx.Field {
 		edge = colFocus
 	}
-	pixel.Fill(img, r, face)
-	pixel.Outline(img, r, edge)
+	fillRounded(img, r, face, bx.Rad)
+	outlineRounded(img, r, edge, clampRad(r, bx.Rad))
 	txt := ascii(f.Value)
+	if txt == "" && !f.Submit && v.Focus != bx.Field {
+		// De placeholder is de belofte van het veld — grijs, tot er
+		// getikt wordt.
+		if ph, ok := attr(f.node, "placeholder"); ok {
+			txt = ascii(ph)
+			ink = colRule
+		}
+	}
 	if v.Focus == bx.Field && !f.Submit {
 		txt += "_"
 	}
@@ -3326,9 +3582,9 @@ func (v *View) renderField(img *image.RGBA, bx *Box, top, bot int) {
 		txt = txt[len(txt)-max:] // het einde in beeld: daar wordt getikt
 	}
 	if f.Submit {
-		drawTxtCentered(img, r, bx.Scale, colText, txt)
+		drawTxtCentered(img, r, bx.Scale, ink, txt)
 	} else {
-		drawTxt(img, r.Min.X+4, r.Min.Y+(r.Dy()-charH(bx.Scale))/2, bx.Scale, colText, txt)
+		drawTxt(img, r.Min.X+4, r.Min.Y+(r.Dy()-charH(bx.Scale))/2, bx.Scale, ink, txt)
 	}
 }
 

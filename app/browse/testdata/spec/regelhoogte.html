@@ -1,0 +1,21 @@
+<!doctype html>
+<html><head><style>
+  .ruim { line-height: 2 }
+  .strak { line-height: 1.1 }
+  .krant { font-size: 16px; line-height: 26px }
+</style></head><body>
+<p>defeen<br>deftwee</p>
+<p class="ruim">ruimeen<br>ruimtwee</p>
+<p class="strak">strakeen<br>straktwee</p>
+<p class="krant">kranteen<br>kranttwee</p>
+</body></html>
+<script type="text/x-expect">
+# zonder declaratie: de vaste interlinie (12px regel + 4px lucht)
+regelafstand defeen deftwee 15 17
+# line-height: 2 - dubbele regelpitch (12px extra lucht)
+regelafstand ruimeen ruimtwee 22 26
+# line-height: 1.1 - strak op elkaar
+regelafstand strakeen straktwee 12 14
+# een lengte rekent tegen de gedeclareerde font-size (26/16 = 1.6)
+regelafstand kranteen kranttwee 18 21
+</script>

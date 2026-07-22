@@ -493,8 +493,9 @@ func ancestorForm(n *html.Node) *html.Node {
 // Grenzen (zelfde gedachte als bij de afbeeldingen: bare metal, begrensde
 // heap en begrensde tijd).
 const (
-	cssMaxSheets = 12        // externe stylesheets per pagina (tweakers: 11, de header-regel zit in #8)
-	cssMaxBytes  = 256 << 10 // per sheet, over de lijn
+	cssMaxSheets  = 12        // externe stylesheets per pagina (tweakers: 11, de header-regel zit in #8)
+	cssMaxImports = 8         // @import-sheets bovenop de links (elke import is een fetch)
+	cssMaxBytes   = 256 << 10 // per sheet, over de lijn
 	cssMaxRules  = 10240     // na filtering; media reist mee, dus mobiel+desktop samen — krap cappen kost juist de mobiele overrides
 	cssBudget    = 5 * time.Second
 )
@@ -560,7 +561,17 @@ func (s *Session) loadStyles() {
 		}(b)
 	}
 	wg.Wait()
+	importBudget := cssMaxImports
 	for _, b := range bronnen {
+		// @import: sheets die sheets laden — relatieve verwijzingen resolven
+		// tegen de importerende sheet, niet tegen de pagina.
+		base := s.base
+		if b.href != "" {
+			if u, err := s.resolve(b.href); err == nil {
+				base = u
+			}
+		}
+		b.tekst = s.expandImports(b.tekst, base, &importBudget, 0)
 		rules = append(rules, parseCSSm(b.tekst, len(rules), b.mq)...)
 	}
 	if len(rules) > cssMaxRules {
@@ -682,6 +693,104 @@ func (s *Session) stylesFor(width int) map[*html.Node]props {
 	}
 	s.styleCache, s.styleW = styles, width
 	return styles
+}
+
+// expandImports vervangt @import-statements door de inhoud van de
+// geïmporteerde sheet — zonder dit bestaan sheets die zo bundelen
+// simpelweg niet en blijft de pagina half ongestyled. Een mediaconditie
+// op de import wordt een omhullend @media-blok (dezelfde evaluatie als
+// elke andere query), een supports(...)-conditie evalueert tegen
+// supportedProp. budget en depth begrenzen het fetchen (import-cycli!).
+func (s *Session) expandImports(css string, base *url.URL, budget *int, depth int) string {
+	if depth >= 3 || !strings.Contains(css, "@import") {
+		return css
+	}
+	css = stripComments(css)
+	var out strings.Builder
+	for i := 0; i < len(css); {
+		j := strings.Index(css[i:], "@import")
+		if j < 0 {
+			out.WriteString(css[i:])
+			break
+		}
+		j += i
+		end := strings.IndexByte(css[j:], ';')
+		if end < 0 {
+			out.WriteString(css[i:])
+			break
+		}
+		out.WriteString(css[i:j])
+		stmt := css[j+len("@import") : j+end]
+		i = j + end + 1
+		ref, mq, ok := importTarget(stmt)
+		if !ok || ref == "" || strings.HasPrefix(ref, "data:") || *budget <= 0 || base == nil {
+			continue
+		}
+		if mq != "" && !mediaAnyWidth(mq) {
+			continue // print e.d.: kan op geen enkele breedte gelden
+		}
+		u, err := base.Parse(ref)
+		if err != nil {
+			continue
+		}
+		*budget--
+		sub := s.expandImports(s.fetchText(u.String()), u, budget, depth+1)
+		if mq != "" {
+			sub = "@media " + mq + "{" + sub + "}"
+		}
+		out.WriteString(sub)
+	}
+	return out.String()
+}
+
+// importTarget leest het doel uit een @import-statement: url(...) of een
+// string, daarna optioneel layer(...)/layer en supports(...) — de rest is
+// de mediaquery. ok=false als een supports-conditie faalt.
+func importTarget(stmt string) (ref, mq string, ok bool) {
+	stmt = strings.TrimSpace(stmt)
+	switch {
+	case strings.HasPrefix(strings.ToLower(stmt), "url("):
+		end := closeParen(stmt, 3)
+		if end < 0 {
+			return "", "", false
+		}
+		ref = strings.Trim(strings.TrimSpace(stmt[4:end]), `"'`)
+		stmt = stmt[end+1:]
+	case len(stmt) > 1 && (stmt[0] == '"' || stmt[0] == '\''):
+		j := strings.IndexByte(stmt[1:], stmt[0])
+		if j < 0 {
+			return "", "", false
+		}
+		ref = stmt[1 : 1+j]
+		stmt = stmt[j+2:]
+	default:
+		return "", "", false
+	}
+	rest := strings.TrimSpace(stmt)
+	for {
+		low := strings.ToLower(rest)
+		switch {
+		case strings.HasPrefix(low, "layer("):
+			end := closeParen(rest, len("layer(")-1)
+			if end < 0 {
+				return ref, "", true
+			}
+			rest = strings.TrimSpace(rest[end+1:])
+		case strings.HasPrefix(low, "layer"):
+			rest = strings.TrimSpace(rest[len("layer"):])
+		case strings.HasPrefix(low, "supports("):
+			end := closeParen(rest, len("supports(")-1)
+			if end < 0 {
+				return ref, "", true
+			}
+			if !supportsCond(rest[len("supports("):end]) {
+				return "", "", false // conditie faalt: de import vervalt
+			}
+			rest = strings.TrimSpace(rest[end+1:])
+		default:
+			return ref, rest, true
+		}
+	}
 }
 
 // fetchText haalt één tekst-subresource (stylesheet) begrensd op; "" bij pech.

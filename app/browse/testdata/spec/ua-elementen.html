@@ -1,0 +1,27 @@
+<!doctype html>
+<html><head></head><body>
+<blockquote>citaatregel hier</blockquote>
+<p>van <s>negenennegentig</s> voor vijftig euro</p>
+<p>H<sub>2</sub>O en de voetnoot<sup>12</sup></p>
+<dl><dt>termwoord</dt><dd>uitlegwoord</dd></dl>
+<p>druk op <kbd>Ctrl</kbd> om door te gaan</p>
+<p><del>geschrapt</del> en <ins>toegevoegd</ins></p>
+</body></html>
+<script type="text/x-expect">
+# blockquote: ingesprongen met het citaat-balkje langs de kant
+ingesprongen citaatregel
+streep citaatregel #b0b0b8
+# s/del: doorgestreept (het prijzen-patroon), ins/u onderstreept
+doorgestreept negenennegentig
+doorgestreept geschrapt
+onderstreept toegevoegd
+# sub hangt onder de regelbasis, sup erboven
+lager 2 H
+hoger 12 voetnoot
+# dl: de beschrijving springt in onder de term
+onder uitlegwoord termwoord
+ingesprongen uitlegwoord
+# kbd: een toets-chip met vlak en rand
+achtergrond Ctrl #e2e6ee
+rand Ctrl
+</script>

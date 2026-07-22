@@ -41,7 +41,9 @@ func supportedProp(p string) bool {
 		"white-space", "flex", "flex-grow", "flex-basis", "flex-flow", "order",
 		"object-fit", "aspect-ratio",
 		"justify-content", "align-items", "align-self", "place-items", "place-content",
-		"text-transform", "text-decoration", "text-decoration-line":
+		"text-transform", "text-decoration", "text-decoration-line",
+		"line-height", "-webkit-line-clamp", "line-clamp", "text-overflow",
+		"vertical-align", "z-index":
 		return true
 	}
 	return false
@@ -113,6 +115,15 @@ func parseCSSm(src string, seq0 int, mq []string) []cssRule {
 					rules = append(rules, parseCSSm(body, seq0+len(rules), sub)...)
 				}
 			}
+			// @supports: half het web wikkelt zijn grid/flex-layout hierin —
+			// die blokken overslaan verliest regels voor dingen die we WÉL
+			// kunnen. De conditie evalueert tegen supportedProp: dezelfde
+			// waarheid als de regel-filter, geen tweede lijst.
+			if strings.HasPrefix(sel, "@supports") {
+				if supportsCond(sel[len("@supports"):]) {
+					rules = append(rules, parseCSSm(body, seq0+len(rules), mq)...)
+				}
+			}
 			continue
 		}
 		decls := parseDecls(body)
@@ -130,6 +141,64 @@ func parseCSSm(src string, seq0 int, mq []string) []cssRule {
 		}
 	}
 	return rules
+}
+
+// supportsCond evalueert een @supports-conditie: (prop: waarde) is waar
+// als wij de property dragen — supportedProp is de enige waarheid, er
+// komt geen tweede lijst. and/or/not en geneste haakjes zoals de spec ze
+// schrijft; onbekende vormen (selector(...), font-format(...)) zijn niet
+// waar — net als in een browser die ze niet kent.
+func supportsCond(c string) bool {
+	c = strings.TrimSpace(c)
+	if parts := splitCond(c, " or "); len(parts) > 1 {
+		for _, p := range parts {
+			if supportsCond(p) {
+				return true
+			}
+		}
+		return false
+	}
+	if parts := splitCond(c, " and "); len(parts) > 1 {
+		for _, p := range parts {
+			if !supportsCond(p) {
+				return false
+			}
+		}
+		return true
+	}
+	if strings.HasPrefix(strings.ToLower(c), "not") {
+		return !supportsCond(c[len("not"):])
+	}
+	if len(c) > 1 && c[0] == '(' && closeParen(c, 0) == len(c)-1 {
+		inner := strings.TrimSpace(c[1 : len(c)-1])
+		if i := strings.IndexByte(inner, ':'); i >= 0 && !strings.ContainsAny(inner[:i], "()") {
+			return supportedProp(strings.ToLower(strings.TrimSpace(inner[:i])))
+		}
+		return supportsCond(inner) // geneste conditie: ((a) or (b))
+	}
+	return false
+}
+
+// splitCond splitst op een keyword (" or ", " and ") van het buitenste
+// niveau; haakjes blijven heel. Lengte 1 = geen splitsing.
+func splitCond(s, kw string) []string {
+	var out []string
+	depth, start := 0, 0
+	low := strings.ToLower(s)
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		}
+		if depth == 0 && strings.HasPrefix(low[i:], kw) {
+			out = append(out, strings.TrimSpace(s[start:i]))
+			start = i + len(kw)
+			i += len(kw) - 1
+		}
+	}
+	return append(out, strings.TrimSpace(s[start:]))
 }
 
 // mediaProbeWidths: de breedtes waarop we proeven of een query überhaupt
@@ -324,7 +393,8 @@ func rootFontPx(v string) float64 {
 	return 16
 }
 
-// cssLen: een CSS-lengte naar hele pixels (px; em/rem op de wortelbasis).
+// cssLen: een CSS-lengte naar hele pixels (px; em/rem op de wortelbasis;
+// vw/vh tegen het venster — layoutbreedte en vensterhoogte).
 func cssLen(v string) (int, bool) {
 	v = strings.TrimSpace(v)
 	mul := 1.0
@@ -335,6 +405,22 @@ func cssLen(v string) (int, bool) {
 		v, mul = strings.TrimSuffix(v, "em"), remPx
 	case strings.HasSuffix(v, "px"):
 		v = strings.TrimSuffix(v, "px")
+	case strings.HasSuffix(v, "vw"):
+		// dvw/svw/lvw (de dynamische viewport-varianten) zijn bij ons
+		// hetzelfde venster — er beweegt geen adresbalk.
+		for _, sfx := range []string{"dvw", "svw", "lvw", "vw"} {
+			if strings.HasSuffix(v, sfx) {
+				v, mul = strings.TrimSuffix(v, sfx), float64(viewW)/100
+				break
+			}
+		}
+	case strings.HasSuffix(v, "vh"):
+		for _, sfx := range []string{"dvh", "svh", "lvh", "vh"} {
+			if strings.HasSuffix(v, sfx) {
+				v, mul = strings.TrimSuffix(v, sfx), float64(viewH)/100
+				break
+			}
+		}
 	case v == "0":
 	default:
 		return 0, false
@@ -1931,6 +2017,61 @@ func gridRailPx(v string, avail, gap int) int {
 		return 0
 	}
 	return toks[1].px
+}
+
+// leadFor vertaalt line-height naar onze interlinie (px lucht boven de
+// volgende regel): een kale factor of procent × de regelhoogte, een
+// lengte tegen de gedeclareerde font-size. Dé leesbaarheidsknop — kranten
+// zetten 1.6, strakke chrome 1.1. Geklemd op [1, 16]; 0 = default/normal.
+func leadFor(v string, scale int, cp props) int {
+	v = strings.TrimSpace(v)
+	f := 0.0
+	switch {
+	case v == "" || v == "normal":
+		return 0
+	case strings.HasSuffix(v, "%"):
+		if n, err := strconv.ParseFloat(strings.TrimSuffix(v, "%"), 64); err == nil {
+			f = n / 100
+		}
+	default:
+		if n, err := strconv.ParseFloat(v, 64); err == nil {
+			f = n
+		} else if px, ok := cssLen(v); ok && px > 0 {
+			base := 16.0
+			if fs, ok := cssLen(cp["font-size"]); ok && fs > 0 {
+				base = float64(fs)
+			}
+			f = float64(px) / base
+		}
+	}
+	if f <= 0 {
+		return 0
+	}
+	extra := int(f*float64(charH(scale))) - charH(scale)
+	if extra < 1 {
+		extra = 1
+	}
+	if extra > 16 {
+		extra = 16
+	}
+	return extra
+}
+
+// clampLines: het regelbudget van een element — (-webkit-)line-clamp N,
+// of de éénregel-variant white-space:nowrap + text-overflow:ellipsis.
+// 0 = geen kap.
+func clampLines(cp props) int {
+	for _, k := range []string{"-webkit-line-clamp", "line-clamp"} {
+		if v, ok := cp[k]; ok {
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 1 && n <= 20 {
+				return n
+			}
+		}
+	}
+	if strings.Contains(cp["text-overflow"], "ellipsis") && cp["white-space"] == "nowrap" {
+		return 1
+	}
+	return 0
 }
 
 // boldWeight: is deze font-weight vet op een font zonder gewichten?

@@ -1,0 +1,17 @@
+<!doctype html>
+<html><head></head><body>
+<svg style="display:none" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="merk" viewBox="0 0 491 147"><rect width="491" height="147" fill="#cc2200"/></symbol>
+  <symbol id="loep" viewBox="0 0 640 770"><rect width="640" height="770" fill="#2244cc"/></symbol>
+</svg>
+<p><svg preserveAspectRatio="xMidYMid meet" width="110" height="55"><use xlink:href="#merk"></use></svg> merkregel</p>
+<p><svg width="26" height="26"><use xlink:href="#loep"></use></svg> loepregel</p>
+</body></html>
+<script type="text/x-expect">
+# het NRC-patroon: een use-symbol met een ANDERE verhouding dan de
+# host-doos (491:147 in 110x55, en 640:770 in een vierkant) hoort
+# gepast te worden (letterbox), niet uitgerekt - de viewBox is de
+# verhouding, de doos is alleen het vak
+pasplaat 110 55
+pasplaat 26 26
+</script>

@@ -1,0 +1,43 @@
+<!doctype html>
+<html><head><style>
+  .a { color: #202024 }
+  @supports (display: grid) {
+    .a { color: #cc2200 }
+  }
+  @supports not (display: grid) {
+    .b { color: #2244cc }
+  }
+  @supports (backdrop-filter: blur(2px)) {
+    .c { color: #cc2200 }
+  }
+  @supports (display: flex) and (gap: 1rem) {
+    .d { color: #008000 }
+  }
+  @supports (foo: bar) or (color: red) {
+    .e { color: #6a2a8a }
+  }
+  @supports (display: flex) {
+    @media (min-width: 900px) { .f { color: #cc2200 } }
+  }
+</style></head><body>
+<p class="a">raster</p>
+<p class="b">terugval</p>
+<p class="c">wazig</p>
+<p class="d">samen</p>
+<p class="e">keuze</p>
+<p class="f">smalpad</p>
+</body></html>
+<script type="text/x-expect">
+# wij dragen display (grid incluis): het blok geldt
+kleur raster #cc2200
+# not (display: grid): de fallback-tak is voor browsers zonder grid - wij niet
+kleur terugval #202024
+# backdrop-filter dragen we niet: blok overslaan (net als een echte browser zonder)
+kleur wazig #202024
+# and: beide condities gedragen
+kleur samen #008000
+# or: een van beide is genoeg
+kleur keuze #6a2a8a
+# een @media in het @supports-blok blijft gewoon meedoen (en geldt hier niet)
+kleur smalpad #202024
+</script>

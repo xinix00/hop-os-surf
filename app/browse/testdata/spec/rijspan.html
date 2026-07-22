@@ -1,0 +1,17 @@
+<!doctype html>
+<html><head><style>
+  table { width: 100% }
+  td { border: 1px solid #8899aa }
+</style></head><body>
+<table>
+  <tr><td rowspan="2">linkervak dat twee rijen beslaat</td><td>rechtsboven</td></tr>
+  <tr><td>rechtsonder</td></tr>
+</table>
+</body></html>
+<script type="text/x-expect">
+# rowspan: de tweede rij weet dat kolom 1 bezet is - zijn cel hoort
+# in kolom 2, uitgelijnd onder de cel erboven (niet tegen de kantlijn)
+rechtsvan rechtsboven linkervak
+onder rechtsonder rechtsboven
+zelfdekolom rechtsonder rechtsboven
+</script>

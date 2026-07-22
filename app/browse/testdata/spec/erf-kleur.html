@@ -1,0 +1,28 @@
+<!doctype html>
+<html><head><style>
+  .kaart { color: #8b0000; padding: 8px }
+  .kaart a { color: inherit }
+  .knop { display: block; width: 200px; color: #2244cc; border: 2px solid currentColor; padding: 6px }
+  .icoon { color: #cc2200 }
+  .midden { text-align: center }
+  .midden p { text-align: inherit }
+</style></head><body>
+<div class="kaart"><a href="/artikel">erflink</a></div>
+<p><a href="/elders">gewoonlink</a></p>
+<div class="knop">omrand</div>
+<p class="icoon"><svg width="40" height="40" viewBox="0 0 20 20"><rect width="20" height="20" fill="currentColor"/></svg> ernaast</p>
+<div class="midden"><p>middentekst</p></div>
+</body></html>
+<script type="text/x-expect">
+# color: inherit - de kaartkleur wint van de UA-linkkleur
+kleur erflink #8b0000
+link erflink /artikel
+# zonder eigen kleurregel blijft een link gewoon blauw
+kleur gewoonlink #1a4fc4
+# border: currentColor - de rand in de tekstkleur van het blok
+randkleur omrand #2244cc
+# fill: currentColor op een inline svg - het icoon in de cascade-kleur
+plaatpunt 40 40 20 20 #cc2200
+# text-align: inherit erft echt (en reset niet naar links)
+gecentreerd middentekst
+</script>

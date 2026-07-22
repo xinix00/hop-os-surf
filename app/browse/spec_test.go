@@ -142,6 +142,14 @@ func specMux() http.Handler {
 		"/pix/nest.svg": []byte(`<svg xmlns="http://www.w3.org/2000/svg" width="60" height="80" viewBox="0 0 60 80">` +
 			`<svg id="boven" width="60" height="40" viewBox="0 0 60 40"><rect width="60" height="40" fill="#cc2200"/></svg>` +
 			`<svg id="onder" width="60" height="40" y="40" viewBox="0 0 120 80"><rect width="120" height="80" fill="#22aa44"/></svg></svg>`),
+		// import-*: de @import-keten — a importeert b (relatief) en een
+		// media-gebonden derde; stijl hangt aan een <style>-blok.
+		"/pix/import-a.css": []byte(`@import "import-b.css";
+@import url(/pix/import-breed.css) (min-width: 900px);
+.ge-a { color: #cc2200 }`),
+		"/pix/import-b.css":     []byte(`.ge-b { color: #2244cc }`),
+		"/pix/import-breed.css": []byte(`.ge-breed { color: #cc2200 }`),
+		"/pix/import-stijl.css": []byte(`.stijl { color: #6a2a8a }`),
 		// twk-symbolen: het tweakers-vel voor de kop-fixture — wordmark op
 		// hun echte verhouding (139:38) plus een paar fa-iconen.
 		"/pix/twk-symbolen.svg": []byte(`<svg xmlns="http://www.w3.org/2000/svg">` +
@@ -394,6 +402,27 @@ func specCheck(p Page, w int, toks []string) error {
 			pb := &p.Boxes[i]
 			if pb.HasBrd && cen.In(pb.R) {
 				return nil
+			}
+		}
+		return fmt.Errorf("geen rand-vlak onder %q", arg(1))
+	case "randkleur":
+		// het vlak onder de tekst heeft een rand in precies deze kleur
+		b, err := box(1)
+		if err != nil {
+			return err
+		}
+		c, err := col(2)
+		if err != nil {
+			return err
+		}
+		cen := boxCenter(b.R)
+		for i := range p.Boxes {
+			pb := &p.Boxes[i]
+			if pb.HasBrd && cen.In(pb.R) {
+				if pb.Border == c {
+					return nil
+				}
+				return fmt.Errorf("rand in %v, wil %v", pb.Border, c)
 			}
 		}
 		return fmt.Errorf("geen rand-vlak onder %q", arg(1))
@@ -660,6 +689,43 @@ func specCheck(p Page, w int, toks []string) error {
 		if p.HasBG && luma(p.BG) < 128 {
 			return fmt.Errorf("paginacanvas is donker: %v", p.BG)
 		}
+	case "veldkleur", "veldrond", "veldhoog", "veldkaal":
+		// de stijl van een invoerveld/knop, gevonden op zijn name-attribuut
+		var fb *Box
+		for i := range p.Fields {
+			if p.Fields[i].Name == arg(1) {
+				for j := range p.Boxes {
+					if p.Boxes[j].Field == i+1 {
+						fb = &p.Boxes[j]
+					}
+				}
+			}
+		}
+		if fb == nil {
+			return fmt.Errorf("geen veld %q op de pagina", arg(1))
+		}
+		switch toks[0] {
+		case "veldkleur":
+			c, err := col(2)
+			if err != nil {
+				return err
+			}
+			if !fb.HasBG || fb.BG != c {
+				return fmt.Errorf("veld heeft achtergrond %v/%v, wil %v", fb.HasBG, fb.BG, c)
+			}
+		case "veldrond":
+			if fb.Rad == 0 {
+				return fmt.Errorf("veld heeft geen hoekstraal")
+			}
+		case "veldhoog":
+			if absInt(fb.R.Dy()-num(2)) > 2 {
+				return fmt.Errorf("veld is %dpx hoog, wil %d", fb.R.Dy(), num(2))
+			}
+		case "veldkaal":
+			if fb.HasBG || fb.HasBrd || fb.Rad != 0 {
+				return fmt.Errorf("veld hoort de UA-default te dragen: %+v", fb)
+			}
+		}
 	case "veldbreedte":
 		for i := range p.Fields {
 			if p.Fields[i].Name == arg(1) {
@@ -762,7 +828,7 @@ func specCheck(p Page, w int, toks []string) error {
 		if err != nil {
 			return err
 		}
-		zone := b.R.Inset(-12) // ook een strook nét onder de padding telt
+		zone := b.R.Inset(-24) // ook een strook aan de overkant van de padding telt (blockquote: 16px + balk)
 		for i := range p.Boxes {
 			pb := &p.Boxes[i]
 			if pb.Rule && pb.Col == c && pb.R.Overlaps(zone) {
@@ -777,6 +843,50 @@ func specCheck(p Page, w int, toks []string) error {
 		}
 		if !b.Under {
 			return fmt.Errorf("niet onderstreept")
+		}
+	case "doorgestreept":
+		b, err := box(1)
+		if err != nil {
+			return err
+		}
+		if !b.Strike {
+			return fmt.Errorf("niet doorgestreept")
+		}
+	case "lager":
+		// a hangt lager dan b op (ruwweg) dezelfde regel — sub-offset
+		a, b, err := twee()
+		if err != nil {
+			return err
+		}
+		if a.R.Min.Y <= b.R.Min.Y || !yOverlap(a, b) {
+			return fmt.Errorf("hoort lager op de regel: %v vs %v", a.R, b.R)
+		}
+	case "hoger":
+		a, b, err := twee()
+		if err != nil {
+			return err
+		}
+		if a.R.Min.Y >= b.R.Min.Y || !yOverlap(a, b) {
+			return fmt.Errorf("hoort hoger op de regel: %v vs %v", a.R, b.R)
+		}
+	case "zelfdekolom":
+		// beide beginnen op dezelfde x — kolomuitlijning (rowspan!)
+		a, b, err := twee()
+		if err != nil {
+			return err
+		}
+		if absInt(a.R.Min.X-b.R.Min.X) > 8 {
+			return fmt.Errorf("kolomstart %d vs %d", a.R.Min.X, b.R.Min.X)
+		}
+	case "regelafstand":
+		// de verticale pitch tussen twee regelstarts, binnen [min, max] —
+		// de line-height-knop
+		a, b, err := twee()
+		if err != nil {
+			return err
+		}
+		if d := b.R.Min.Y - a.R.Min.Y; d < num(3) || d > num(4) {
+			return fmt.Errorf("regelafstand %d, wil %d..%d", d, num(3), num(4))
 		}
 	default:
 		return fmt.Errorf("onbekende verwachting %q", toks[0])

@@ -1,0 +1,28 @@
+<!doctype html>
+<html><head><style>
+  table { width: 100% }
+  td { vertical-align: middle }
+  .hoog { height: 90px; background-color: #eef2f8 }
+  .wrap { position: relative; height: 80px }
+  .onderop { position: absolute; top: 10px; left: 20px; z-index: 1;
+             background-color: #cc2200; color: #ffffff; width: 140px }
+  .bovenop2 { position: absolute; top: 18px; left: 60px; z-index: 5;
+              background-color: #2244cc; color: #ffffff; width: 140px }
+</style></head><body>
+<table><tr>
+  <td class="hoog">hoogvak met inhoud die doorloopt</td>
+  <td>middenin</td>
+</tr></table>
+<div class="wrap">
+  <div class="bovenop2">laterlaag</div>
+  <div class="onderop">eerstlaag</div>
+</div>
+</body></html>
+<script type="text/x-expect">
+# vertical-align: middle - de korte cel hangt in het midden van de rij
+vmidden middenin hoogvak
+# z-index sorteert de late laag: z:5 schildert over z:1 heen,
+# ook al staat hij eerder in de bron
+bovenop laterlaag eerstlaag
+overlapt laterlaag eerstlaag
+</script>

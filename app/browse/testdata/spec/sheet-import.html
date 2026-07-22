@@ -1,0 +1,25 @@
+<!doctype html>
+<html><head>
+<link rel="stylesheet" href="/pix/import-a.css">
+<style>
+  @import url(/pix/import-stijl.css);
+  .lokaal { color: #008000 }
+</style>
+</head><body>
+<p class="ge-a">alfa</p>
+<p class="ge-b">beta</p>
+<p class="ge-breed">breed</p>
+<p class="stijl">stijlimport</p>
+<p class="lokaal">lokaal</p>
+</body></html>
+<script type="text/x-expect">
+# @import: de regels uit de geimporteerde sheet gelden gewoon
+kleur alfa #cc2200
+# genest: de import importeert zelf ook, relatief opgelost tegen de sheet
+kleur beta #2244cc
+# een mediaconditie op de import reist mee: geldt niet op 480px
+kleur breed #202024
+# @import werkt ook in een <style>-blok, naast gewone regels
+kleur stijlimport #6a2a8a
+kleur lokaal #008000
+</script>
