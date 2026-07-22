@@ -1,0 +1,25 @@
+<!doctype html>
+<html><head>
+<link rel="apple-touch-icon" href="/pix/rood.png">
+<style>
+  nav { display: flex; background: #113355; }
+  nav a { color: #ffffff; }
+</style></head><body>
+<nav>
+  <div class="site-logo"><a href="/" aria-label="Voorbeeldsite: nieuws en meer"><twk-icon name="logo" role="img"></twk-icon></a></div>
+  <span><twk-icon name="weer" role="img" aria-label="weerbericht icoon"></twk-icon></span>
+  <a href="/nieuws/">Nieuws</a>
+</nav>
+<p>onder de balk</p>
+</body></html>
+<script type="text/x-expect">
+# het logo-slot zonder JS (tweakers' lege twk-icon): alléén het
+# site-icoon — geen verzonnen naam ernaast, het echte wordmark bevat de
+# merknaam immers zelf
+plaatjes 1
+verborgen "Voorbeeldsite"
+# een leeg element met role="img" en een aria-label is een afbeelding met
+# alt-tekst: het alt-principe, dus toon het label
+zichtbaar "weerbericht icoon"
+onder "onder de balk" "Nieuws"
+</script>

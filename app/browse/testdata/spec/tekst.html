@@ -1,0 +1,45 @@
+<!doctype html>
+<html><head><style>
+.groen { color: #008000; }
+.hl { background-color: #ffee00; }
+.mid { text-align: center; }
+.groot { font-size: 24px; }
+</style></head><body>
+<h1>Grote kop</h1>
+<h2>Tussenkop</h2>
+<p>Gewone tekst met <b>vetgedrukt</b> en <span class="groen">groene woorden</span> erin.</p>
+<p class="mid">precies in het midden</p>
+<p class="mid"><span class="hl">chip in het midden</span></p>
+<p><mark>goudmerk</mark> en <span class="hl">geel gemarkeerd</span> en <code>codewoord</code></p>
+<p><a href="/pagina2">doorklikker</a></p>
+<p class="groot">flink groter</p>
+<pre>kolom-a  kolom-b</pre>
+<ul><li>eerste punt</li><li>tweede punt</li></ul>
+</body></html>
+<script type="text/x-expect">
+# koppen en schalen: de UA-stylesheet gaat door dezelfde cascade
+schaal "Grote kop" 3
+vet "Grote kop"
+schaal "Tussenkop" 2
+onder "Tussenkop" "Grote kop"
+schaal "Gewone tekst" 1
+nietvet "Gewone tekst"
+vet "vetgedrukt"
+# kleuren: author-CSS en UA-kleuren
+kleur "groene woorden" #008000
+kleur "codewoord" #6a2a8a
+kleur "doorklikker" #1a4fc4
+link "doorklikker" "/pagina2"
+# uitlijning, markering, witruimtebehoud
+gecentreerd "precies in het midden"
+# een gecentreerde chip: doos én inhoud schuiven samen mee
+gecentreerd "chip in het midden"
+achtergrond "chip in het midden" #ffee00
+achtergrond "goudmerk" #ffd700
+achtergrond "geel gemarkeerd" #ffee00
+schaal "flink groter" 2
+zichtbaar "kolom-a  kolom-b"
+# lijstitems: ingesprongen met een lijstteken ervoor
+zichtbaar "- eerste punt"
+ingesprongen "- eerste punt"
+</script>

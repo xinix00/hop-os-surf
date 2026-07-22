@@ -1,0 +1,16 @@
+<!doctype html>
+<html><head><style>
+.zwevend { float: right; }
+.held { background-image: url(/pix/foto.png); background-size: cover; }
+</style></head><body>
+<p><img src="/pix/rood.png" alt="rood blok"></p>
+<p><img class="zwevend" src="/pix/blauw.png" alt="blauw blok">Tekst die om het blauwe blok heen stroomt en nog even doorgaat zodat er echt regels naast komen te staan.</p>
+<div class="held"><p>tekst op de foto</p></div>
+</body></html>
+<script type="text/x-expect">
+# img-elementen renderen als afbeelding (ook de float)
+plaatjes 2
+zichtbaar "heen stroomt"
+# background-image op een blok: de foto ligt onder de tekst
+tegel "tekst op de foto"
+</script>

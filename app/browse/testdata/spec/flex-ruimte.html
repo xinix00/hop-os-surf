@@ -1,0 +1,21 @@
+<!doctype html>
+<html><head><style>
+.midden { display: flex; flex-direction: row; justify-content: center; }
+.tussen { display: flex; flex-direction: row; justify-content: space-between; }
+.vast { width: 120px; background: #ddeeff; border: 1px solid #8899aa; }
+.wikkel { display: flex; flex-wrap: wrap; gap: 24px 8px; }
+.w { background: #eeeeee; }
+</style></head><body>
+<div class="midden"><div class="vast">midden-a</div><div class="vast">midden-b</div></div>
+<div class="tussen"><div class="vast">tussen-a</div><div class="vast">tussen-b</div></div>
+<div class="wikkel"><div class="w">gap1</div><div class="w">gap2</div><div class="w">gap3</div><div class="w">gap4</div></div>
+</body></html>
+<script type="text/x-expect">
+# justify-content op een kaartenrij: vaste kolommen delen de vrije ruimte
+rechtsvan "midden-b" "midden-a"
+middenpaar "midden-a" "midden-b"
+vlaklinks "tussen-a"
+vlakrechts "tussen-b"
+# gap met twee waarden: "rijgap kolomgap" — de tweede wikkelrij ligt een rijgap lager
+ruimteonder "gap3" "gap1" 20
+</script>

@@ -1,0 +1,44 @@
+<!doctype html>
+<html><head><style>
+.veld { position: relative; height: 200px; width: 300px; margin: 0 auto; text-align: center; }
+.vak { position: absolute; width: 100px; }
+.rechtsvak { background: #ddeeff; }
+.linksvak { background: #ffeedd; }
+.r60 { top: 10px; right: 60%; }
+.l60 { top: 10px; left: 60%; }
+.ondervak { background: #ddffdd; }
+.r80 { top: 80%; right: 60%; }
+.spacer { height: 60px; }
+</style></head><body>
+<div class="veld">
+  <div class="vak rechtsvak r60">rechtsvak</div>
+  <div class="vak linksvak l60">linksvak</div>
+  <div class="vak ondervak r80">ondervak</div>
+</div>
+<p>na het veld</p>
+<div class="spacer"></div>
+<p>na de spacer</p>
+</body></html>
+<script type="text/x-expect">
+# het wikipedia-cirkelpatroon: position:absolute en de top/right-ankers
+# staan in VERSCHILLENDE regels (de cascade voegt ze samen), en de
+# container centreert zelf met width + margin: 0 auto
+vlakbreedte "rechtsvak" 100
+vlakbreedte "linksvak" 100
+rechtsvan "linksvak" "rechtsvak"
+middenpaar "rechtsvak" "linksvak"
+# de procent-ankers rekenen tegen de gecentreerde container (90..390):
+# right:60% -> 90+300-180-100 = 110; left:60% -> 90+180 = 270
+vlakx "rechtsvak" 110
+vlakx "linksvak" 270
+# top:80% rekent tegen de GEGEVEN ouderhoogte (200px -> y+160)
+vlakx "ondervak" 110
+ruimteonder "ondervak" "rechtsvak" 100
+# text-align: center van de container erft dóór in de absolute vakken:
+# de tekst staat in het midden van zijn eigen vak
+hmidden "ondervak" "ondervak"
+# de container reserveert zijn height, ook zonder achtergrondvlak
+onder "na het veld" "rechtsvak"
+# en een kale spacer-div met height houdt echt ruimte vrij
+ruimteonder "na de spacer" "na het veld" 55
+</script>

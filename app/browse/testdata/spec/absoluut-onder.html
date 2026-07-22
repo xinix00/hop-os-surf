@@ -1,0 +1,22 @@
+<!doctype html>
+<html><head><style>
+.kaart { position: relative; background: #f0f0f0; }
+.onderin { position: absolute; bottom: 2px; right: 4px; background: #005500; color: #ffffff; }
+</style></head><body>
+<div class="kaart">
+<p>kaart met een hoekje rechtsonder</p>
+<p>tweede regel van de kaart</p>
+<p>derde regel van de kaart</p>
+<span class="onderin">hoeklabel</span>
+</div>
+<p>navolgende tekst</p>
+</body></html>
+<script type="text/x-expect">
+# bottom/right-anker: het label hangt in de rechteronderhoek van de kaart
+rechterrand "hoeklabel"
+onder "hoeklabel" "tweede regel van de kaart"
+bovenop "hoeklabel" "derde regel van de kaart"
+# en een absoluut element is shrink-to-fit: het vlak omvat de tekst
+# (9 tekens x 6px + kaartpadding), niet de pagina
+vlakbreedte "hoeklabel" 70
+</script>

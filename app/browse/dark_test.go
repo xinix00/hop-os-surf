@@ -103,3 +103,44 @@ func TestFlexBasis(t *testing.T) {
 		t.Fatalf("column-reverse hoort de volgorde om te draaien: boven=%v onder=%v", boven, onder)
 	}
 }
+
+// TestFlexAutoMarge: margin-left:auto duwt een rij-item naar rechts, en
+// kaartvlakken in één rij worden even hoog (align-items: stretch).
+func TestFlexAutoMarge(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`<html><head><style>
+header { display: flex; }
+nav { margin-left: auto; }
+.rij { display: flex; flex-direction: row; }
+.kaart { background: #eee; border: 1px solid #999; }
+</style></head><body>
+<header><span>logo</span><nav><a href="/x">menu</a></nav></header>
+<div class="rij">
+<div class="kaart">kort</div>
+<div class="kaart">deze kaart heeft veel meer tekst en wordt dus hoger dan de korte</div>
+</div>
+</body></html>`))
+	})
+	s := NewSessionHandler(mux)
+	if err := s.Go("example.com"); err != nil {
+		t.Fatalf("Go: %v", err)
+	}
+	p := s.Layout(480)
+	menu := find(p, "menu")
+	if menu == nil || menu.R.Max.X < 480-pad-40 {
+		t.Fatalf("margin-left:auto hoort het menu rechts te zetten: %+v", menu)
+	}
+	var vlakken []*Box
+	for i := range p.Boxes {
+		if p.Boxes[i].HasBrd {
+			vlakken = append(vlakken, &p.Boxes[i])
+		}
+	}
+	if len(vlakken) != 2 {
+		t.Fatalf("wil 2 kaartvlakken, kreeg %d", len(vlakken))
+	}
+	if vlakken[0].R.Dy() != vlakken[1].R.Dy() {
+		t.Fatalf("kaarten in één rij horen even hoog (stretch): %v vs %v", vlakken[0].R, vlakken[1].R)
+	}
+}

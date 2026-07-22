@@ -1,0 +1,47 @@
+<!doctype html>
+<html><head><style>
+  /* het holy-grail-patroon met benoemde gebieden: kop over de volle
+     breedte, zijbalk naast hoofd, voet weer vol */
+  .rooster { display: grid;
+             grid-template-columns: 120px 1fr;
+             grid-template-areas: "kop kop" "zij hoofd" "voet voet";
+             gap: 8px; }
+  .kop   { grid-area: kop; background: #113355; color: #ffffff; }
+  .zij   { grid-area: zij; background: #ddeedd; }
+  .hoofd { grid-area: hoofd; background: #eef2ff; }
+  .voet  { grid-area: voet; background: #e2e2e2; }
+  /* uitlijning ín de cel: justify-items op de container, justify-self wint */
+  .knoppen { display: grid; grid-template-columns: 1fr 1fr; justify-items: center; }
+  .midden { background: #ddeeff; }
+  .rechtsom { justify-self: end; background: #ffeedd; }
+</style></head><body>
+<div class="rooster">
+  <div class="kop">de kop over alles</div>
+  <div class="zij">zijbalk</div>
+  <div class="hoofd">de hoofdtekst leeft naast de zijbalk en is veel breder</div>
+  <div class="voet">de voet over alles</div>
+</div>
+<div class="knoppen">
+  <div class="midden">midden in de cel</div>
+  <div class="rechtsom">tegen de celrand</div>
+</div>
+</body></html>
+<script type="text/x-expect">
+# grid-template-areas: kop en voet beslaan beide kolommen, zij en hoofd
+# delen de middenrij volgens de tracks
+vlaklinks "de kop over alles"
+vlakrechts "de kop over alles"
+vlakbreedte "zijbalk" 120
+rechtsvan "de hoofdtekst leeft" "zijbalk"
+vlakrechts "de hoofdtekst leeft"
+onder "zijbalk" "de kop over alles"
+onder "de voet over alles" "zijbalk"
+vlaklinks "de voet over alles"
+vlakrechts "de voet over alles"
+# justify-items: center — het item krimpt naar zijn inhoud (~112 breed
+# op het 6px-font) en staat midden in zijn cel; justify-self: end wint
+# en plakt tegen de rechterrand van de tweede cel
+vlakbreedte "midden in de cel" 112
+vlakx "midden in de cel" 63
+vlakrechts "tegen de celrand"
+</script>

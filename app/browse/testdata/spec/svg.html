@@ -1,0 +1,18 @@
+<!doctype html>
+<html><head></head><body>
+<p><svg width="60" height="40" viewBox="0 0 60 40"><rect width="60" height="40" fill="#cc2200"></rect><circle cx="45" cy="20" r="10" fill="#0022cc"></circle></svg></p>
+<p><img src="/pix/vorm.svg" width="30" alt="vorm"></p>
+<p><svg viewBox="0 0 24 24"><use href="#elders"></use></svg><span>sprite-verwijzing</span></p>
+</body></html>
+<script type="text/x-expect">
+# een inline <svg> rastert op zijn eigen maat, met de echte vulkleuren
+plaatmaat 60 40
+plaatpunt 60 40 10 20 #cc2200
+plaatpunt 60 40 45 20 #0022cc
+# een <img src="*.svg"> is gewoon een afbeelding (hier op width=30 -> 30x20)
+plaatmaat 30 20
+# een svg die alleen een <use>-sprite-verwijzing is valt stil weg:
+# precies twee afbeeldingen op deze pagina, geen zwart blok erbij
+plaatjesprecies 2
+zichtbaar "sprite-verwijzing"
+</script>

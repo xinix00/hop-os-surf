@@ -1,0 +1,34 @@
+<!doctype html>
+<html><head><style>
+  nav { display: flex; background: #171c2c; align-items: center; }
+  nav a { color: #ffffff; }
+  .site-logo svg { width: 120px; height: 24px; }
+  .ster svg { width: 20px; height: 20px; }
+</style></head><body>
+<svg style="display:none" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="ster" viewBox="0 0 20 20"><rect width="20" height="20" fill="#cc8800"/></symbol>
+</svg>
+<nav>
+  <div class="site-logo">
+    <a href="/" aria-label="site"><twk-icon name="logo" class="icon" role="img"><svg><use href="/pix/symbolen.svg#logo-vol"></use></svg></twk-icon></a>
+  </div>
+  <span class="ster"><svg><use href="#ster"></use></svg></span>
+  <a href="/zoeken">zoeken</a>
+  <a href="/menu">menuknop</a>
+</nav>
+<p>onder de balk</p>
+</body></html>
+<script type="text/x-expect">
+# het externe sprite-symbool (tweakers' wordmark): de sheet opgehaald,
+# het symbool uitgeknipt en op de CSS-maat gerasterd
+plaatmaat 120 24
+plaatpunt 120 24 10 12 #ff6600
+# het document-interne symbool (NRC's logo-patroon)
+plaatmaat 20 20
+plaatpunt 20 20 10 10 #cc8800
+# de onzichtbare sheet rendert niet mee: precies twee plaatjes
+plaatjesprecies 2
+# de nav blijft een flexrij
+rechtsvan "menuknop" "zoeken"
+onder "onder de balk" "menuknop"
+</script>

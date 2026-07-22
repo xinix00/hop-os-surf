@@ -553,8 +553,10 @@ func TestParseCSS(t *testing.T) {
 	if rules[3].sel != ".x" || rules[3].decls["color"] != "blue" {
 		t.Fatalf(".x uit @media screen mist: %+v", rules[3])
 	}
-	if rules[0].decls["margin"] != "4px" {
-		t.Fatalf("margin hoort gedragen te zijn: %+v", rules[0])
+	// De shorthand gaat bij het parsen volledig op in zijn longhands — zo
+	// wint in de cascade altijd de laatste declaratie, welke vorm ook.
+	if rules[0].decls["margin-top"] != "4px" || rules[0].decls["margin-left"] != "4px" {
+		t.Fatalf("margin hoort als longhands gedragen te zijn: %+v", rules[0])
 	}
 	var desk *cssRule
 	for i := range rules {
@@ -647,5 +649,47 @@ func TestAscii(t *testing.T) {
 		if got := ascii(c.in); got != c.want {
 			t.Errorf("ascii(%q) = %q, wil %q", c.in, got, c.want)
 		}
+	}
+}
+
+func TestReuzefotoEnSpatie(t *testing.T) {
+	// easyflorist: 24-megapixel webp's (6000x4000) en bestandsnamen met
+	// spaties ("waarom 1.webp"). De reus wordt gedecodeerd (binnen het
+	// piek-budget) en meteen teruggeschaald; de spatie-URL wordt netjes
+	// ge-encodeerd zoals elke browser doet.
+	pngBytes := func(w, h int) []byte {
+		m := image.NewRGBA(image.Rect(0, 0, w, h))
+		for i := range m.Pix {
+			m.Pix[i] = 0xFF
+		}
+		var buf bytes.Buffer
+		png.Encode(&buf, m)
+		return buf.Bytes()
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/groot.png":
+			w.Write(pngBytes(3200, 130)) // boven de 2048-zijde, binnen het budget
+		case "/waarom 1.png":
+			w.Write(pngBytes(40, 20))
+		default:
+			w.Write([]byte(`<html><body>
+<p><img src="/groot.png" alt="reus"></p>
+<p><img src="./waarom 1.png" alt="spatie"></p>
+</body></html>`))
+		}
+	})
+	s := NewSessionHandler(mux)
+	if err := s.Go("example.com"); err != nil {
+		t.Fatalf("Go: %v", err)
+	}
+	if m := s.imgs["/groot.png"]; m == nil {
+		t.Errorf("reuzefoto niet geladen (boven het oude 2048-kader)")
+	} else if b := m.Bounds(); b.Dx() != 2048 {
+		t.Errorf("reus hoort teruggeschaald op 2048 breed, is %v", b)
+	}
+	if s.imgs["./waarom 1.png"] == nil {
+		t.Errorf("spatie-URL niet geladen")
 	}
 }

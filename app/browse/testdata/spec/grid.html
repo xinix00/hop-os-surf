@@ -1,0 +1,25 @@
+<!doctype html>
+<html><head><style>
+.twee { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.breedsmal { display: grid; grid-template-columns: 2fr 1fr; }
+.drie { display: grid; grid-template-columns: repeat(3, 1fr); }
+.cel { background: #e8f4e8; }
+</style></head><body>
+<div class="twee"><div class="cel">links-a</div><div class="cel">rechts-a</div></div>
+<div class="breedsmal"><div class="cel">brede kolom</div><div class="cel">smalle</div></div>
+<div class="drie"><div class="cel">g1</div><div class="cel">g2</div><div class="cel">g3</div></div>
+<table><tr><td>cel-een</td><td>cel-twee</td></tr><tr><td>cel-drie</td><td>cel-vier</td></tr></table>
+</body></html>
+<script type="text/x-expect">
+# 1fr 1fr: twee gelijke kolommen
+rechtsvan "rechts-a" "links-a"
+# 2fr 1fr: gewichten, geen gelijke verdeling
+rechtsvan "smalle" "brede kolom"
+bredervlak "brede kolom" "smalle"
+# repeat(3, 1fr)
+rechtsvan "g2" "g1"
+rechtsvan "g3" "g2"
+# een tabel rendert als grid: td's naast elkaar, tr's onder elkaar
+rechtsvan "cel-twee" "cel-een"
+onder "cel-drie" "cel-een"
+</script>

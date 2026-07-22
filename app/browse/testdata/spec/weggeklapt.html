@@ -1,0 +1,16 @@
+<!doctype html>
+<html><head><style>
+.dicht { max-height: 0; overflow: hidden; }
+.nul { height: 0; overflow: hidden; }
+</style></head><body>
+<div class="dicht">weggeklapt paneel</div>
+<div class="nul">nulhoogte blok</div>
+<p>de zichtbare rest</p>
+</body></html>
+<script type="text/x-expect">
+# overflow:hidden op (max-)hoogte 0: de JS-loze dichte staat van
+# accordeons en uitklapmenu's — die inhoud is er niet
+verborgen "weggeklapt paneel"
+verborgen "nulhoogte blok"
+zichtbaar "de zichtbare rest"
+</script>

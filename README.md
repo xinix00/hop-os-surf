@@ -68,6 +68,12 @@ and 1280 the desktop layout (real flex/grid columns):
 go test ./app/browse -run ScreenshotSites   # writes docs/browser-<site>[-desktop].png
 ```
 
+The engine's living spec is [docs/browser-plan.md](docs/browser-plan.md):
+every behaviour is a fixture in `app/browse/testdata/spec/` with its
+expectations embedded, and `go test ./app/browse -run Spec` renders them all
+(including the open `.todo` gaps) to
+[docs/browser-spec.png](docs/browser-spec.png) — offline, every run.
+
 | tweakers.net | nrc.nl | nu.nl | gethop.org/hop/ |
 |---|---|---|---|
 | ![tweakers](docs/browser-tweakers.png) | ![nrc](docs/browser-nrc.png) | ![nu](docs/browser-nu.png) | ![gethop](docs/browser-gethop.png) |

@@ -1,0 +1,50 @@
+<!doctype html>
+<html><head><style>
+  .links { float: left; width: 120px; background: #ddeeff; }
+  .rechts { float: right; width: 140px; background: #ffeedd; }
+  .voet { clear: both; background: #e2e2e2; }
+  .tagje { float: left; background: #ccffcc; }
+  /* de float-rij: NRC's header is float:left-knoppen in een float:right-balk */
+  .knop { float: left; background: #ddddee; }
+  .balk { float: right; background: #eedddd; }
+</style></head><body>
+<div class="links">linker kaart</div>
+<div class="rechts">rechter kaart</div>
+<p>de lopende tekst stroomt netjes tussen de twee drijvende kaarten door en wrapt binnen de middenbaan</p>
+<div class="voet">de voet begint pas onder beide kaarten</div>
+<div class="tagje">tagje</div>
+<p>tekst naast het tagje</p>
+<div class="werkbalk">
+  <span class="knop">knopa</span>
+  <span class="knop">knopb</span>
+  <span class="knop">knopc</span>
+  <div class="balk"><span class="knop">knopd</span><span class="knop">knope</span></div>
+</div>
+<p>na de werkbalk</p>
+</body></html>
+<script type="text/x-expect">
+# float:left — het blok drijft links, op zijn eigen maat
+vlakx "linker kaart" 6
+vlakbreedte "linker kaart" 120
+# float:right — tegen de rechterrand
+vlakrechts "rechter kaart"
+vlakbreedte "rechter kaart" 140
+# de tekst stroomt ernaast, niet eronder
+rechtsvan "de lopende tekst" "linker kaart"
+overlapt "de lopende tekst" "rechter kaart"
+# clear: de voet wacht tot beide floats voorbij zijn
+onder "de voet begint" "linker kaart"
+onder "de voet begint" "rechter kaart"
+# een float zonder width is shrink-to-fit: een tag, geen balk
+bredervlak "linker kaart" "tagje"
+rechtsvan "tekst naast het tagje" "tagje"
+# de float-rij: opeenvolgende float:left-knoppen rijgen aan elkaar
+rechtsvan "knopb" "knopa"
+rechtsvan "knopc" "knopb"
+# ... en een float:right-balk met eigen knopjes hangt rechts ernaast
+rechtsvan "knope" "knopd"
+rechtsvan "knopd" "knopc"
+vlakrechts "knope"
+# het blok sluit: de volgende alinea begint onder de rij
+onder "na de werkbalk" "knopa"
+</script>

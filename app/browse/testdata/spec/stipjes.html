@@ -1,0 +1,18 @@
+<!doctype html>
+<html><head><style>
+  .stippen { display: flex; gap: 6px; align-items: center; }
+  .stippen span { width: 8px; height: 8px; background: #999999; }
+  .stippen .actief { background: #cc2200; }
+</style></head><body>
+<p>galerij met stipjes eronder</p>
+<div class="stippen"><span></span><span></span><span></span><span class="actief"></span></div>
+<p>en de tekst gaat verder</p>
+</body></html>
+<script type="text/x-expect">
+# lege spans mét een maat en een achtergrond zijn gewoon vlakjes
+# (carrousel-stipjes, statuslampjes) — grijs is grijs
+vlakjes 3 8 8 #999999
+vlakjes 1 8 8 #cc2200
+# de rij stipjes leeft tussen de alinea's, niet erdoorheen
+onder "en de tekst gaat verder" "galerij met stipjes eronder"
+</script>

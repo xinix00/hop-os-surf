@@ -1,0 +1,13 @@
+<!doctype html>
+<html><head><style>
+.up { text-transform: uppercase; }
+</style></head><body>
+<p>Menukop: <span class="up">rubrieken</span></p>
+<p><a href="/artikel">onderstreepte artikellink</a></p>
+</body></html>
+<script type="text/x-expect">
+# text-transform: uppercase — menu's zetten hun kapitalen via CSS
+zichtbaar "RUBRIEKEN"
+# links horen standaard onderstreept
+onderstreept "onderstreepte artikellink"
+</script>

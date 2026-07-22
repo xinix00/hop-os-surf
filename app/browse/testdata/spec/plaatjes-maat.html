@@ -1,0 +1,19 @@
+<!doctype html>
+<html><head><style>
+.icoon { width: 32px; height: 32px; }
+</style></head><body>
+<p><img src="/pix/foto.png" width="48" height="30" alt="klein"></p>
+<p><img src="/pix/foto.png" width="80" alt="verhouding"></p>
+<p><img class="icoon" src="/pix/blauw.png" alt="icoon"></p>
+<p><img data-src="/pix/rood.png" alt="lui"></p>
+<p><img srcset="/pix/blauw.png 1x, /pix/foto.png 2x" alt="set"></p>
+</body></html>
+<script type="text/x-expect">
+# width/height-attributen en CSS-maten sturen de weergavemaat
+plaatmaat 48 30
+# een enkele maat schaalt proportioneel (foto is 160x100)
+plaatmaat 80 50
+plaatmaat 32 32
+# lazy data-src en srcset laden ook: vijf afbeeldingen op de pagina
+plaatjes 5
+</script>

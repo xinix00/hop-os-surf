@@ -1,0 +1,14 @@
+<!doctype html>
+<html><head><style>
+.helft { width: calc(50% - 10px); background: #ddeeff; }
+.hoog { min-height: 120px; background: #eeffdd; }
+</style></head><body>
+<div class="helft"><p>halve breedte</p></div>
+<div class="hoog"><p>hoge strook</p></div>
+</body></html>
+<script type="text/x-expect">
+# calc(): alomtegenwoordig in echte stylesheets — 50% van 468 min 10
+vlakbreedte "halve breedte" 224
+# min-height: hero's en stroken met ademruimte
+vlakhoogte "hoge strook" 120
+</script>

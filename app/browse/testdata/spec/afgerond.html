@@ -1,0 +1,22 @@
+<!doctype html>
+<html><head><style>
+  .kaart { background: #eef2ff; border: 1px solid #8899aa; border-radius: 12px; }
+  .knop { background: #2244cc; color: #ffffff; border-radius: 8px; }
+  .rij { display: flex; }
+  .bol { width: 12px; height: 12px; border-radius: 50%; background: #999999; }
+  .avatar { border-radius: 50%; }
+</style></head><body>
+<div class="kaart">een kaart met zachte hoeken</div>
+<p><span class="knop">ronde knop</span> in de regel</p>
+<div class="rij"><span class="bol"></span><span class="bol"></span></div>
+<img class="avatar" src="/pix/blauw.png" width="48" height="48">
+</body></html>
+<script type="text/x-expect">
+# border-radius: het vlak weet dat zijn hoeken rond zijn
+rond "een kaart met zachte hoeken"
+rond "ronde knop"
+# een 50%-bolletje blijft een maatvlakje (de straal klemt op de halve maat)
+vlakjes 2 12 12 #999999
+# een ronde avatar: de hoeken van het plaatje zijn doorzichtig
+rondeplaat 48 48
+</script>

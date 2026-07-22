@@ -1,0 +1,17 @@
+<!doctype html>
+<html><head><style>
+.vul { width: 40px; height: 100px; object-fit: cover; }
+.ratio { width: 90px; aspect-ratio: 3 / 2; }
+</style></head><body>
+<p><img class="vul" src="/pix/banden.png" alt="gevuld"></p>
+<p><img class="ratio" src="/pix/rood.png" alt="verhouding"></p>
+</body></html>
+<script type="text/x-expect">
+plaatmaat 40 100
+# object-fit: cover snijdt bij in plaats van te pletten — van de drie
+# banden (rood|groen|blauw) blijft alleen de middenband over
+plaatpunt 40 100 5 50 #22aa44
+plaatpunt 40 100 35 50 #22aa44
+# aspect-ratio maakt de ontbrekende maat af (3:2 bij breedte 90)
+plaatmaat 90 60
+</script>

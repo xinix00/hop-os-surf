@@ -1,0 +1,28 @@
+<!doctype html>
+<html><head><style>
+.rail { display: grid; grid-template-columns: 1fr [midden-start] calc(2 * 100px + 40px) [midden-end] 1fr; }
+.strook { background: #ddeeff; }
+.kop { display: grid; grid-template-columns: 0.75rem fit-content(2rem) minmax(0, 1fr) 2.125rem; gap: 8px; }
+.zes { display: grid; grid-template-columns: repeat(6, 1fr); }
+.strip { display: grid; grid-auto-flow: column; }
+</style></head><body>
+<div class="rail"><p class="strook">rail-inhoud</p></div>
+<div class="kop"><span></span><b>K</b><a href="/a">artikeltitel hier</a><time>2:22</time></div>
+<div class="strip"><span>s1</span><span>s2</span><span>s3</span><span>s4</span><span>s5</span></div>
+<div class="zes"><span>z1</span><span>z2</span><span>z3</span><span>z4</span><span>z5</span><span>z6</span></div>
+</body></html>
+<script type="text/x-expect">
+# het centreer-spoor (tweakers' page-grid): 1fr [naam] calc(240px) [naam] 1fr
+# is geen kolommenset maar centrering — de middenbaan van 240 in het midden
+vlakx "rail-inhoud" 118
+vlakbreedte "rail-inhoud" 240
+# smalle vaste sporen + fit-content + minmax(0,1fr): de kop-rij van tweakers
+rechtsvan "artikeltitel hier" "K"
+rechtsvan "2:22" "artikeltitel hier"
+# grid-auto-flow: column zonder template: elk item zijn eigen kolom
+rechtsvan "s2" "s1"
+rechtsvan "s5" "s4"
+# en zes gelijke kolommen mogen gewoon (footers op desktop)
+rechtsvan "z2" "z1"
+rechtsvan "z6" "z5"
+</script>

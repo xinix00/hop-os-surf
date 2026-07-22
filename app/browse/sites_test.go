@@ -28,7 +28,7 @@ func TestScreenshotSites(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	sites := []string{"tweakers.net", "nrc.nl", "nu.nl", "gethop.org/hop/"}
+	sites := []string{"tweakers.net", "nrc.nl", "nu.nl", "gethop.org/hop/", "wikipedia.org"}
 	if v := os.Getenv("SITE_LIST"); v != "" {
 		sites = strings.Split(v, ",")
 	}

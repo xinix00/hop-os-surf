@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/andybalholm/cascadia"
@@ -53,13 +54,14 @@ const pageMaxBytes = 8 << 20
 
 // Session is één browservenster.
 type Session struct {
-	client *http.Client
-	doc    *html.Node
-	addr   *url.URL               // adres van de huidige pagina (na redirects)
-	base   *url.URL               // addr + <base href>: anker voor relatieve links
-	imgs   map[string]image.Image // gedecodeerde <img>'s van de huidige pagina, op raw src
-	edits  map[*html.Node]string  // ingetikte veldwaarden (overleven een re-layout)
-	icon   image.Image            // apple-touch-icon: vult het logo-slot als de site zelf svg/JS is
+	client  *http.Client
+	doc     *html.Node
+	addr    *url.URL               // adres van de huidige pagina (na redirects)
+	history []string               // verlaten pagina's, oudste eerst — de terug-knop
+	base    *url.URL               // addr + <base href>: anker voor relatieve links
+	imgs    map[string]image.Image // gedecodeerde <img>'s van de huidige pagina, op raw src
+	edits   map[*html.Node]string  // ingetikte veldwaarden (overleven een re-layout)
+	icon    image.Image            // apple-touch-icon: vult het logo-slot als de site zelf svg/JS is
 
 	// De cascade in twee stappen: matchen is duur en breedte-onafhankelijk
 	// (één keer per pagina, in de nav-goroutine), de media-evaluatie is
@@ -192,9 +194,27 @@ func (s *Session) Follow(href string) error {
 	return s.navigate(href)
 }
 
+// Back navigeert naar de laatst verlaten pagina (de terug-knop). Een
+// mislukte terug-hop laat de historie intact; zonder historie is het een
+// nette fout voor de statusbalk.
+func (s *Session) Back() error {
+	if len(s.history) == 0 {
+		return fmt.Errorf("geen vorige pagina")
+	}
+	prev := s.history[len(s.history)-1]
+	if err := s.navigate(prev); err != nil {
+		return err
+	}
+	// navigate pushte de zojuist verlaten pagina: die én de bestemming
+	// zelf van de stapel — terug is geen vooruit.
+	s.history = s.history[:max(len(s.history)-2, 0)]
+	return nil
+}
+
 // navigate is de gedeelde landing van Go en Follow: resolven, laden, een
 // eventuele consent-muur één keer door, en dan de subresources laden.
 func (s *Session) navigate(ref string) error {
+	prev := s.URL() // voor de historie: de pagina die we (mogelijk) verlaten
 	u, err := s.resolve(ref)
 	if err != nil {
 		return err
@@ -232,17 +252,28 @@ func (s *Session) navigate(ref string) error {
 		final = &clean
 	}
 	s.doc, s.addr = doc, final
+	// Historie voor de terug-knop: de pagina die we zojuist verlieten
+	// (herladen van hetzelfde adres telt niet, de lege start ook niet).
+	if prev != "" && prev != "about:blank" && prev != final.String() {
+		s.history = append(s.history, prev)
+		if len(s.history) > 32 {
+			s.history = s.history[1:]
+		}
+	}
 	s.base = pageBase(doc, final)
-	s.edits = nil // nieuwe pagina, verse velden
+	s.edits = nil   // nieuwe pagina, verse velden
+	s.resolveUses() // svg <use> → symbolen inlijmen (sprite-sheets ophalen)
 	s.loadStyles()
 	s.loadImages()
 	s.loadIcon()
 	return nil
 }
 
-// resolve maakt van een adres of href een absolute http(s)-URL.
+// resolve maakt van een adres of href een absolute http(s)-URL. Spaties
+// ín het pad ("waarom 1.webp" — easyflorist) encoderen we zoals elke
+// browser dat doet; url.Parse zou er anders op stuklopen.
 func (s *Session) resolve(ref string) (*url.URL, error) {
-	r, err := url.Parse(strings.TrimSpace(ref))
+	r, err := url.Parse(strings.ReplaceAll(strings.TrimSpace(ref), " ", "%20"))
 	if err != nil {
 		return nil, err
 	}
@@ -489,30 +520,49 @@ func (s *Session) loadStyles() {
 		}
 		return []string{m}, true
 	}
-	var walk func(n *html.Node)
-	walk = func(n *html.Node) {
-		if n.Type == html.ElementNode {
-			switch n.Data {
-			case "style":
+	// Eerst verzamelen (de cascade-volgorde is heilig), dan de externe
+	// sheets parallel over de lijn, dan in bronvolgorde parsen.
+	type bron struct {
+		tekst string
+		href  string
+		mq    []string
+	}
+	var bronnen []*bron
+	eachEl(s.doc, func(n *html.Node) {
+		switch n.Data {
+		case "style":
+			if mq, ok := sheetMQ(n); ok {
+				bronnen = append(bronnen, &bron{tekst: textContent(n), mq: mq})
+			}
+		case "link":
+			rel, _ := attr(n, "rel")
+			href, _ := attr(n, "href")
+			if strings.EqualFold(strings.TrimSpace(rel), "stylesheet") && href != "" && links < cssMaxSheets {
 				if mq, ok := sheetMQ(n); ok {
-					rules = append(rules, parseCSSm(textContent(n), len(rules), mq)...)
-				}
-			case "link":
-				rel, _ := attr(n, "rel")
-				href, _ := attr(n, "href")
-				if strings.EqualFold(strings.TrimSpace(rel), "stylesheet") && href != "" && links < cssMaxSheets {
-					if mq, ok := sheetMQ(n); ok {
-						links++
-						rules = append(rules, parseCSSm(s.fetchText(href), len(rules), mq)...)
-					}
+					links++
+					bronnen = append(bronnen, &bron{href: href, mq: mq})
 				}
 			}
 		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
+	})
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 6)
+	for _, b := range bronnen {
+		if b.href == "" {
+			continue
 		}
+		wg.Add(1)
+		go func(b *bron) {
+			defer wg.Done()
+			sem <- struct{}{}
+			b.tekst = s.fetchText(b.href)
+			<-sem
+		}(b)
 	}
-	walk(s.doc)
+	wg.Wait()
+	for _, b := range bronnen {
+		rules = append(rules, parseCSSm(b.tekst, len(rules), b.mq)...)
+	}
 	if len(rules) > cssMaxRules {
 		rules = rules[:cssMaxRules]
 	}
@@ -551,6 +601,29 @@ func (s *Session) stylesFor(width int) map[*html.Node]props {
 		return s.styleCache
 	}
 	styles := map[*html.Node]props{}
+	// Presentational hints: het width/height-attribuut van svg's en
+	// ouderwetse tabellen is per spec een declaratie op de láágste plek in
+	// de cascade — elke echte CSS-regel wint er dus van (ze staan hier vóór
+	// de matched-lus). <img> houdt bewust zijn eigen attribuut-pad in
+	// imgSize: daar hoort de beeldverhouding-regel bij (CSS height:auto
+	// schakelt het attribuut uit — wikipedia's ei).
+	eachEl(s.doc, func(n *html.Node) {
+		switch n.Data {
+		case "svg", "td", "th", "table":
+			for _, k := range []string{"width", "height"} {
+				if v, ok := attr(n, k); ok {
+					if hv := hintLen(v); hv != "" {
+						p := styles[n]
+						if p == nil {
+							p = props{}
+							styles[n] = p
+						}
+						p[k] = hv
+					}
+				}
+			}
+		}
+	})
 	vars := map[string]string{} // custom properties, doc-globaal (versimpeld: geen scoping)
 	for _, r := range s.matched {
 		if !ruleMediaOK(r.mq, width) {
@@ -639,8 +712,13 @@ func (s *Session) fetchText(href string) string {
 // tekst, net als bij een laadfout.
 const (
 	imgMaxCount = 32      // per pagina
-	imgMaxBytes = 4 << 20 // per afbeelding, over de lijn
-	imgMaxDim   = 2048    // px, per zijde (2048² RGBA = 16MB gedecodeerd)
+	imgMaxBytes = 8 << 20 // per afbeelding, over de lijn (easyflorist: 4,8MB-webp's)
+	imgMaxDim   = 2048    // px, per zijde — wat we bewáren (2048² RGBA = 16MB)
+	// De decode-piek die we aandurven: sites serveren rustig 24-megapixel
+	// foto's (easyflorist: 6000×4000 webp). jpeg/webp decoderen naar YCbCr
+	// (~2 B/px), png/gif naar RGBA (4 B/px) — na de decode schalen we
+	// meteen terug naar imgMaxDim, dus dit is een píek, geen bezit.
+	imgMaxDecode = 96 << 20 // bytes (easyflorists grootste: 7952×5304 webp ≈ 84MB)
 )
 
 // loadImages haalt de <img src>'s van de huidige pagina op en decodeert ze,
@@ -650,46 +728,65 @@ const (
 func (s *Session) loadImages() {
 	s.imgs = nil
 	seen := map[string]bool{}
+	var srcs []string
 	load := func(src string) {
 		if src == "" || seen[src] || len(seen) >= imgMaxCount {
 			return
 		}
 		seen[src] = true
-		if m := s.fetchImage(src); m != nil {
-			if s.imgs == nil {
-				s.imgs = map[string]image.Image{}
-			}
-			s.imgs[src] = m
-		}
+		srcs = append(srcs, src)
 	}
-	var walk func(n *html.Node)
-	walk = func(n *html.Node) {
-		if n.Type == html.ElementNode {
-			if n.Data == "img" {
-				src, _ := attr(n, "src")
-				load(src)
-			}
-			// background-image uit een inline style — de layout zoekt hem
-			// straks op dezelfde sleutel (de rauwe url) terug.
-			if inline, ok := attr(n, "style"); ok {
-				if v, ok := parseDecls(inline)["background-image"]; ok {
-					load(cssURL(v))
-				}
+	eachEl(findEl(s.doc, "body"), func(n *html.Node) {
+		if n.Data == "img" {
+			// Dezelfde bron-keuze als de layout (src/data-src/srcset).
+			load(imgSrc(n))
+		}
+		if n.Data == "video" {
+			// De poster is het beeld dat de layout toont.
+			if v, ok := attr(n, "poster"); ok {
+				load(v)
 			}
 		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
+		// background-image uit een inline style — de layout zoekt hem
+		// straks op dezelfde sleutel (de rauwe url) terug.
+		if inline, ok := attr(n, "style"); ok {
+			if v, ok := parseDecls(inline)["background-image"]; ok {
+				load(cssURL(v))
+			}
 		}
-	}
-	if body := findEl(s.doc, "body"); body != nil {
-		walk(body)
-	}
+	})
 	// background-images uit de stylesheets: uit álle gematchte regels —
 	// niet alleen die van de mobiele breedte, anders mist de desktop-
 	// layout straks zijn achtergronden.
 	for _, r := range s.matched {
 		if v, ok := r.decls["background-image"]; ok {
 			load(cssURL(v))
+		}
+	}
+	// En dan alles tegelijk over de lijn: het wachten zit in het netwerk,
+	// niet in de CPU — zes verbindingen naast elkaar halen een fotorijke
+	// pagina in een fractie van de seriële tijd binnen.
+	type gehaald struct {
+		src string
+		m   image.Image
+	}
+	out := make(chan gehaald)
+	sem := make(chan struct{}, 6)
+	for _, src := range srcs {
+		go func(src string) {
+			sem <- struct{}{}
+			m := s.fetchImage(src)
+			<-sem
+			out <- gehaald{src, m}
+		}(src)
+	}
+	for range srcs {
+		g := <-out
+		if g.m != nil {
+			if s.imgs == nil {
+				s.imgs = map[string]image.Image{}
+			}
+			s.imgs[g.src] = g.m
 		}
 	}
 }
@@ -715,14 +812,48 @@ func (s *Session) fetchImage(src string) image.Image {
 	if err != nil {
 		return nil
 	}
-	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
-	if err != nil || cfg.Width < 1 || cfg.Height < 1 ||
-		cfg.Width > imgMaxDim || cfg.Height > imgMaxDim {
+	// SVG (logo's, iconen): rasteren op eigen maat — daarna is het gewoon
+	// een afbeelding als elke andere. Sprite-vellen met geneste <svg id>'s
+	// eerst: die zou oksvg tot één klodder plakken.
+	if looksLikeSVG(resp.Header.Get("Content-Type"), data) {
+		if m := rasterSVGSheet(data, imgMaxDim); m != nil {
+			return m
+		}
+		if m := rasterSVGNatural(data, 1024); m != nil {
+			return m
+		}
 		return nil
+	}
+	cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || cfg.Width < 1 || cfg.Height < 1 {
+		return nil
+	}
+	perPix := 4 // png/gif: RGBA-achtig
+	if format == "jpeg" || format == "webp" {
+		perPix = 2 // YCbCr 4:2:0 ≈ 1,5 B/px, met marge
+	}
+	if cfg.Width*cfg.Height*perPix > imgMaxDecode {
+		return nil // écht te groot: dan liever de alt-tekst
 	}
 	m, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
 		return nil
+	}
+	// Reuzefoto's meteen terugschalen: de decode-piek is tijdelijk, wat we
+	// bewaren blijft binnen het kader (≤2048 per zijde) — meer dan zat
+	// voor het scherm, en 32 foto's op een pagina blijven zo betaalbaar.
+	if b := m.Bounds(); b.Dx() > imgMaxDim || b.Dy() > imgMaxDim {
+		w, h := b.Dx(), b.Dy()
+		if w > imgMaxDim {
+			h, w = h*imgMaxDim/w, imgMaxDim
+		}
+		if h > imgMaxDim {
+			w, h = w*imgMaxDim/h, imgMaxDim
+		}
+		if w < 1 || h < 1 {
+			return nil
+		}
+		m = scaleTo(m, w, h)
 	}
 	return m
 }

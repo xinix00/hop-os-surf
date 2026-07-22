@@ -1,0 +1,12 @@
+<!doctype html>
+<html><head><style>
+.vast { white-space: nowrap; }
+</style></head><body>
+<p>vulsel dat de eerste regel netjes bijna helemaal vol schrijft nu <span class="vast">drie vaste woorden</span> en daarna verder</p>
+</body></html>
+<script type="text/x-expect">
+# nowrap: het label breekt niet middenin maar verhuist heel naar de
+# volgende regel (zonder nowrap zou "woorden" los komen te staan)
+zichtbaar "drie vaste woorden"
+onder "drie vaste woorden" "vulsel dat de eerste"
+</script>

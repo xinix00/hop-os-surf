@@ -36,6 +36,42 @@ func textContent(n *html.Node) string {
 	return b.String()
 }
 
+// imgSrc: de bron van een <img> — src, of de lazy-loading-conventie
+// data-src, of de eerste kandidaat uit (data-)srcset. Laden (Session) en
+// leggen (layout) gebruiken allebei déze sleutel. data:-URI's zijn
+// placeholder-pixels: die tellen niet, dan liever de echte lazy-bron.
+func imgSrc(el *html.Node) string {
+	if v, ok := attr(el, "src"); ok {
+		if v = strings.TrimSpace(v); v != "" && !strings.HasPrefix(v, "data:") {
+			return v
+		}
+	}
+	if v, ok := attr(el, "data-src"); ok {
+		if v = strings.TrimSpace(v); v != "" && !strings.HasPrefix(v, "data:") {
+			return v
+		}
+	}
+	for _, name := range []string{"srcset", "data-srcset"} {
+		if v, ok := attr(el, name); ok {
+			if c := srcsetFirst(v); c != "" {
+				return c
+			}
+		}
+	}
+	return ""
+}
+
+// srcsetFirst: de eerste bruikbare kandidaat-URL uit een srcset-waarde.
+func srcsetFirst(v string) string {
+	for _, cand := range strings.Split(v, ",") {
+		f := strings.Fields(strings.TrimSpace(cand))
+		if len(f) > 0 && !strings.HasPrefix(f[0], "data:") {
+			return f[0]
+		}
+	}
+	return ""
+}
+
 // findEl zoekt het eerste element met deze (lowercase) tagnaam onder n.
 func findEl(n *html.Node, tag string) *html.Node {
 	if n == nil {
@@ -50,4 +86,18 @@ func findEl(n *html.Node, tag string) *html.Node {
 		}
 	}
 	return nil
+}
+
+// eachEl bezoekt elk element onder n (n zelf inbegrepen), diepte-eerst —
+// dé wandeling onder loadStyles, loadImages, hints en use-resolutie.
+func eachEl(n *html.Node, f func(*html.Node)) {
+	if n == nil {
+		return
+	}
+	if n.Type == html.ElementNode {
+		f(n)
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		eachEl(c, f)
+	}
 }

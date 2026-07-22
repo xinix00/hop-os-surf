@@ -1,0 +1,19 @@
+<!doctype html>
+<html><head><style>
+.prijs { text-align: right; }
+.menu { list-style: none; }
+</style></head><body>
+<p class="prijs">eur 129,-</p>
+<ul class="menu"><li>menupunt zonder teken</li></ul>
+<ol><li>stap een</li><li>stap twee</li></ol>
+</body></html>
+<script type="text/x-expect">
+# text-align: right — prijzen en datums horen tegen de rechterrand
+rechterrand "eur 129,-"
+# list-style: none — een menu is geen opsomming
+zichtbaar "menupunt zonder teken"
+verborgen "- menupunt"
+# een <ol> telt echt: 1. 2. — geen streepjes
+zichtbaar "1. stap een"
+zichtbaar "2. stap twee"
+</script>

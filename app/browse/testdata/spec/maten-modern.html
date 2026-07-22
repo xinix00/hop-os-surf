@@ -1,0 +1,24 @@
+<!doctype html>
+<html><head><style>
+.kleiner { width: min(90%, 200px); background: #ddeeff; }
+.klem { width: clamp(100px, 30%, 160px); background: #ffeedd; }
+.rek { width: 100px; min-width: 300px; background: #eeddff; }
+.klemkop { font-size: clamp(20px, 5vw, 28px); }
+.verloop { background: linear-gradient(180deg, #336699, #112233); color: #ffffff; }
+</style></head><body>
+<div class="kleiner"><p>min-breedte</p></div>
+<div class="klem"><p>geklemd</p></div>
+<div class="rek"><p>opgerekt</p></div>
+<p class="klemkop">klemkop</p>
+<div class="verloop"><p>op het verloop</p></div>
+</body></html>
+<script type="text/x-expect">
+# min()/max()/clamp(): de moderne fluid-maten
+vlakbreedte "min-breedte" 200
+vlakbreedte "geklemd" 140
+vlakbreedte "opgerekt" 300
+# clamp op font-size: onoplosbare vw valt terug op het midden van min/max
+schaal "klemkop" 2
+# een gradient-achtergrond rendert als zijn eerste kleurstop
+achtergrond "op het verloop" #336699
+</script>

@@ -1,0 +1,54 @@
+<!doctype html>
+<html><head><style>
+  /* easyflorists header, vrijwel letterlijk: een grid met een flex erin,
+     en space-between over cellen zónder eigen maat (content-sized) */
+  header { display: grid; grid-template-columns: 1fr 11fr; align-items: center; gap: 3em; padding: 1em 0; }
+  .logo { width: 60px; height: 24px; background: #cc4477; }
+  .nav { display: flex; flex-direction: row; justify-content: space-between; align-items: center; }
+  .nav-popup { display: flex; justify-content: space-between; flex-direction: row; align-items: center; width: 100%; }
+  .nav-links { display: flex; flex-direction: row; gap: 1em; align-items: center; }
+  .nav-buttons { display: flex; flex-direction: row; align-items: center; gap: 1em; }
+  .nav-buttons a { padding: 0.5em 1.25em; border-radius: 20px; border: 1px solid #e0525e; }
+  /* de grow-mix: vast + flex:1 + content — grow pakt de rest */
+  .mix { display: flex; flex-direction: row; gap: 8px; }
+  .vast { width: 100px; background: #ddeeff; }
+  .rek { flex: 1; background: #eeffdd; }
+  .los { background: #ffeedd; }
+</style></head><body>
+<header>
+  <div class="logo"></div>
+  <div class="nav">
+    <div class="nav-popup">
+      <div class="nav-links">
+        <a href="/">Home</a>
+        <a href="/pos">Kassasysteem</a>
+        <a href="/help">Ondersteuning</a>
+        <a href="/contact">Contact</a>
+      </div>
+      <div class="nav-buttons">
+        <a href="/offerte">Offerte aanvragen</a>
+        <a href="/demo">Demo aanvragen</a>
+      </div>
+    </div>
+  </div>
+</header>
+<div class="mix">
+  <div class="vast">vaste kolom</div>
+  <div class="rek">de rekbare kolom pakt alle restruimte</div>
+  <div class="los">losse inhoud</div>
+</div>
+</body></html>
+<script type="text/x-expect">
+breedte 1280
+# space-between over content-cellen: het menu links, de knoppen uiterst
+# rechts — er blijft écht vrije ruimte over om te verdelen
+rechtsvan "Offerte aanvragen" "Contact"
+vlakrechts "Demo aanvragen"
+overlapt "Home" "Demo aanvragen"
+# de grow-mix: de flex:1-kolom is veruit de breedste, de losse kolom
+# blijft op zijn inhoudsmaat
+vlakbreedte "vaste kolom" 100
+bredervlak "de rekbare kolom pakt" "losse inhoud"
+rechtsvan "losse inhoud" "de rekbare kolom pakt"
+vlakrechts "losse inhoud"
+</script>

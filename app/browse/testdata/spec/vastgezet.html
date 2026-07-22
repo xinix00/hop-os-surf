@@ -1,0 +1,38 @@
+<!doctype html>
+<html><head><style>
+  :root { --menuhoogte: 48px; }
+  body { margin: 0; }
+  /* tweakers' .twk-site-menu-bar: fixed bovenbalk, hoogte uit een var */
+  .menubalk { position: fixed; top: 0; left: 0; width: 100%;
+              height: var(--menuhoogte); background: #113355; color: #ffffff; }
+  /* het docs-patroon: top+bottom-paar bepaalt de hoogte (viewport - 48) */
+  .zijbalk { position: fixed; top: var(--menuhoogte); bottom: 0; left: 0;
+             width: 90px; background: #ddeedd; }
+  /* tweakers' paneel-patroon: rechts vastgeplakt, viewporthoog minus de balk */
+  .paneel { position: fixed; top: var(--menuhoogte); right: 0px;
+            width: 120px; height: calc(100% - var(--menuhoogte));
+            background: #eef2ff; }
+  main { margin: 8px 130px 0 100px; }
+</style></head><body>
+<div class="menubalk">menubalk</div>
+<nav class="zijbalk">zijbalk</nav>
+<div class="paneel">paneel</div>
+<main><p>de inhoud stroomt gewoon door</p></main>
+</body></html>
+<script type="text/x-expect">
+# de bovenbalk pint (bestaand gedrag: fixed + top:0)
+gepind
+# het rechterpaneel: tegen de rechterrand, onder de balk, viewporthoog
+# (height: calc(100% - var(--menuhoogte)) rekent tegen de viewport)
+vlakrechts "paneel"
+vlakbreedte "paneel" 120
+minstensy "paneel" 44
+vlakhoogte "paneel" 540
+# de zijbalk: geen height nodig — het top+bottom-paar zegt het al
+vlaklinks "zijbalk"
+vlakbreedte "zijbalk" 90
+vlakhoogte "zijbalk" 540
+# fixed staat los van de flow: de inhoud blijft bovenin, tussen de balken
+overlapt "de inhoud stroomt gewoon door" "paneel"
+bovenop "paneel" "de inhoud stroomt gewoon door"
+</script>

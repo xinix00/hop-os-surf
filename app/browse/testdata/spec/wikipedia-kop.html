@@ -1,0 +1,33 @@
+<!doctype html>
+<html><head><style>
+html { font-size: 62.5%; }
+.kop { margin: 4rem auto .5rem; width: 30rem; text-align: center; }
+.kop h1 { font-size: 3.2rem; margin: 1.2rem 0; }
+.balkje { width: 10rem; background: #ddeeff; }
+.sprite { background-image: url(/pix/sprite.svg); background-repeat: no-repeat; display: inline-block; vertical-align: middle; }
+.merk { background-position: 0 -40px; width: 60px; height: 40px; }
+</style></head><body>
+<div class="kop">
+<h1>Wikipedia</h1>
+<p><span class="sprite merk"></span></p>
+</div>
+<div class="balkje">tienrem</div>
+</body></html>
+<script type="text/x-expect">
+# html{font-size:62.5%} maakt 1rem = 10px: de klassieke rem-truc.
+# 10rem = 100px, niet 160
+vlakbreedte "tienrem" 100
+# de top-marge van het allereerste blok telt: 4rem = 40px (de h1-marge
+# van 1.2rem collapst erin, zoals echte marges doen) — de kop begint lager
+minstensy "Wikipedia" 36
+# 3.2rem = 32px: nog steeds schaal 3
+schaal "Wikipedia" 3
+# text-align:center in een margin-auto-container centreert BINNEN die
+# container (die zelf al op het paginamidden ligt) - niet dubbel
+gecentreerd "Wikipedia"
+# het sprite-patroon: background-position knipt het juiste plaatje uit de
+# sheet (60x80: rood boven, groen onder; -40px = het groene deel)
+plaatmaat 60 40
+plaatpunt 60 40 30 5 #22aa44
+plaatpunt 60 40 30 20 #22aa44
+</script>

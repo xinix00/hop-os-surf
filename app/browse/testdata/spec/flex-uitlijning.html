@@ -1,0 +1,23 @@
+<!doctype html>
+<html><head><style>
+.tussen { display: flex; justify-content: space-between; }
+.middenh { display: flex; justify-content: center; }
+.groei { display: flex; }
+.vast { width: 100px; background: #ddddff; }
+.rek { flex: 1; background: #ffdddd; }
+</style></head><body>
+<div class="tussen"><span>heel-links</span><span>heel-rechts</span></div>
+<div class="middenh"><span>midden-item</span></div>
+<div class="groei"><div class="vast">vaste kolom</div><div class="rek">rekbare kolom</div></div>
+</body></html>
+<script type="text/x-expect">
+# display:flex zonder flex-direction is óók een rij (de default)
+rechtsvan "heel-rechts" "heel-links"
+# justify-content verdeelt de vrije ruimte
+rechterrand "heel-rechts"
+gecentreerd "midden-item"
+# flex-grow/flex-basis: kolomgewichten in plaats van gelijke verdeling
+rechtsvan "rekbare kolom" "vaste kolom"
+vlakbreedte "vaste kolom" 100
+bredervlak "rekbare kolom" "vaste kolom"
+</script>

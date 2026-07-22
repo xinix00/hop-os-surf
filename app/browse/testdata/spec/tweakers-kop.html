@@ -1,0 +1,99 @@
+<!doctype html>
+<html><head><style>
+  /* tweakers' echte kop, ingedikt: de menubalk (fixed, volle breedte) met
+     het flex-menu erin, midden in een gecentreerde pagina-rail. De
+     twk-icons staan hier gehydrateerd (zoals hun JS ze inhangt); de
+     maat-regels onderaan zijn wat hun shadow-stylesheet met
+     --icon-size/--icon-height doet. */
+  :root { --site-menu-height: 3rem; --brand-color: #ad0a4b; --menu-item-padding: 0.375rem; }
+  body { margin: 0; display: grid; grid-template-columns: 1fr [content-start] calc(2 * 400px + 40px) [content-end] 1fr; }
+  .twk-site-menu-wrapper { height: var(--site-menu-height); min-width: 20rem; }
+  .twk-site-menu-bar { background-color: var(--brand-color); height: var(--site-menu-height); left: 0; position: fixed; top: 0; width: 100%; }
+  twk-site-menu { box-sizing: border-box; display: flex; height: 100%; margin-inline: auto; max-width: 89rem; padding-inline: var(--menu-item-padding); }
+  twk-site-menu a { color: #ffffff; text-decoration: none; }
+  twk-site-menu menu { list-style: none; margin: 0; padding: 0; }
+  twk-site-menu .responsive-navigation-trigger { display: none; }
+  twk-site-menu .site-logo { flex-basis: 9.75rem; }
+  twk-site-menu .site-logo a { display: block; height: 100%; padding-inline: var(--menu-item-padding); }
+  :is(twk-site-menu .site-logo)+.site-name { overflow: hidden; position: absolute; text-indent: -1000px; }
+  twk-site-menu .site-navigation { display: flex; flex-grow: 2; min-width: 0; }
+  :is(twk-site-menu .site-navigation) li.frontpage { display: none; }
+  :is(twk-site-menu .site-navigation) li a { display: block; padding-inline: var(--menu-item-padding); line-height: 3rem; white-space: nowrap; }
+  .more:is(:is(twk-site-menu>menu)>li)>.dropdown-menu { box-sizing: border-box; display: none; min-width: max(8rem,100%); position: absolute; top: 2.5rem; }
+  twk-site-menu .user-navigation { display: flex; justify-content: flex-end; margin-left: auto; }
+  :is(twk-site-menu .user-navigation) li a { display: block; padding-inline: var(--menu-item-padding); line-height: 3rem; white-space: nowrap; }
+  /* shadow-equivalent: iconen 1rem; het logo vult zijn baan, balkhoog
+     (hun --icon-width:100% / --icon-height:3rem) */
+  twk-site-menu .icon svg { width: 1rem; height: 1rem; }
+  twk-site-menu .icon.logo svg { width: 100%; height: 3rem; }
+</style></head><body>
+<div id="top" class="header-grid" style="grid-column: content-start / content-end">
+<div class="twk-site-menu-wrapper">
+  <nav class="twk-site-menu-bar" id="menubar">
+    <twk-site-menu>
+      <div class="responsive-navigation-trigger more">
+        <a href="#" class="trigger"><span class="visuallyhidden">Website menu</span><twk-icon name="fa-bars" class="icon" role="presentation"><svg><use href="/pix/twk-symbolen.svg#fa-bars"></use></svg></twk-icon></a>
+      </div>
+      <div class="site-logo">
+        <a href="https://tweakers.net/" aria-label="Tweakers: tech-community, nieuws, reviews en de Pricewatch">
+          <twk-icon name="twk-logo-full" class="icon logo" role="img"><svg><use href="/pix/twk-symbolen.svg#twk-logo-full"></use></svg></twk-icon>
+        </a>
+      </div>
+      <h1 class="site-name">Tweakers</h1>
+      <menu class="site-navigation" role="menubar">
+        <li class="frontpage" role="none"><a href="/" role="menuitem">Frontpage</a></li>
+        <li role="none"><a href="/nieuws/" role="menuitem">Nieuws</a></li>
+        <li role="none"><a href="/reviews/" role="menuitem">Reviews</a></li>
+        <li class="more" role="none">
+          <a href="#" role="menuitem" class="trigger">Best Buy Guides</a>
+          <div class="dropdown-menu"><ul role="menu">
+            <li role="none"><a href="/best-buy-guide/smartphones/" role="menuitem">Smartphones</a></li>
+            <li role="none"><a href="/best-buy-guide/laptops/" role="menuitem">Laptops</a></li>
+          </ul></div>
+        </li>
+        <li role="none"><a href="/pricewatch/" role="menuitem">Pricewatch</a></li>
+        <li role="none"><a href="/forum/" role="menuitem">Forum</a></li>
+        <li role="none"><a href="/deals/" role="menuitem">Deals</a></li>
+        <li class="more last" role="none">
+          <a href="#" role="menuitem" class="trigger">Meer</a>
+          <div class="dropdown-menu"><ul role="menu">
+            <li role="none"><a href="/carriere/" role="menuitem">Carriere</a></li>
+          </ul></div>
+        </li>
+      </menu>
+      <menu id="userbar" class="user-navigation" role="menubar">
+        <li class="icon search" role="none"><a href="#" class="trigger" title="Zoeken"><twk-icon name="fa-magnifying-glass" class="icon" role="img"><svg><use href="/pix/twk-symbolen.svg#fa-magnifying-glass"></use></svg></twk-icon></a></li>
+        <li class="account login" role="none"><a href="/my.tnet/login/" title="Inloggen"><twk-icon name="fa-right-to-bracket" class="icon" role="img"><svg><use href="/pix/twk-symbolen.svg#fa-right-to-bracket"></use></svg></twk-icon><span>Inloggen</span></a></li>
+        <li class="icon more settings" role="none"><a href="#" class="trigger" title="Weergave-opties"><twk-icon name="fa-gear" class="icon" role="img"><svg><use href="/pix/twk-symbolen.svg#fa-gear"></use></svg></twk-icon></a></li>
+      </menu>
+    </twk-site-menu>
+  </nav>
+</div>
+</div>
+<main style="grid-column: content-start / content-end"><p>de voorpagina begint hier</p></main>
+</body></html>
+<script type="text/x-expect">
+breedte 1280
+# de balk pint en beslaat de VOLLE breedte — hij is fixed tegen de
+# viewport, ook al staat hij in de gecentreerde pagina-rail
+gepind
+vlaklinks "Nieuws"
+vlakrechts "Nieuws"
+# alles op één regel: het menu naast elkaar, het gebruikersmenu rechts
+rechtsvan "Reviews" "Nieuws"
+rechtsvan "Pricewatch" "Best Buy Guides"
+rechtsvan "Deals" "Forum"
+rechtsvan "Inloggen" "Meer"
+overlapt "Inloggen" "Nieuws"
+# wat dicht of weggezet is, is er niet: de frontpage-link, de dropdowns
+# en de onzichtbare kop (text-indent:-1000px)
+verborgen "Frontpage"
+verborgen "Smartphones"
+verborgen "Tweakers"
+# het logo: het externe sprite-symbool vult zijn flex-baan (156 minus de
+# randen), balkhoog — wit op de merkkleur
+plaatmaat 132 48
+plaatpunt 132 48 20 24 #ffffff
+# en de pagina zelf begint gewoon bovenaan
+onder "de voorpagina begint hier" "Nieuws"
+</script>

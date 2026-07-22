@@ -1,0 +1,33 @@
+<!doctype html>
+<html><head><style>
+.weg { display: none; }
+.onzichtbaar { visibility: hidden; }
+.sr { position: absolute; width: 1px; height: 1px; clip: rect(0 0 0 0); overflow: hidden; }
+.doorzichtig { opacity: 0; }
+.lade { transform: translateX(-100%); }
+.gecentreerd-truc { transform: translate(-50%, -50%); }
+</style></head><body>
+<p>deze blijft staan</p>
+<p class="weg">weg met display none</p>
+<p class="onzichtbaar">weg met visibility</p>
+<span class="sr">alleen voor schermlezers</span>
+<p class="doorzichtig">volledig doorzichtig</p>
+<div hidden>weg met het hidden-attribuut</div>
+<nav aria-hidden="true">verborgen navigatie</nav>
+<div class="lade">dichte zijlade</div>
+<p class="gecentreerd-truc">gewoon gecentreerd element</p>
+</body></html>
+<script type="text/x-expect">
+zichtbaar "deze blijft staan"
+verborgen "weg met display none"
+verborgen "weg met visibility"
+# het sr-only-patroon: 1x1px + clip — als patroon herkend, geen classnamenlijst
+verborgen "alleen voor schermlezers"
+verborgen "volledig doorzichtig"
+verborgen "weg met het hidden-attribuut"
+verborgen "verborgen navigatie"
+# off-canvas: een (vrijwel) volledige negatieve translate is de dichte
+# staat van een lade — de -50%-centreertruc blijft gewoon staan
+verborgen "dichte zijlade"
+zichtbaar "gewoon gecentreerd element"
+</script>

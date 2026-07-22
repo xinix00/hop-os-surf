@@ -1,0 +1,25 @@
+<!doctype html>
+<html><head><style>
+.wikkel { display: flex; flex-wrap: wrap; }
+.kaart { width: calc(50% - 24px); margin: 12px; background: #eef2ee; }
+</style></head><body>
+<div class="wikkel">
+<div class="kaart">kaart-een</div>
+<div class="kaart">kaart-twee</div>
+<div class="kaart">kaart-drie</div>
+<div class="kaart">kaart-vier</div>
+</div>
+</body></html>
+<script type="text/x-expect">
+# het NRC-patroon: flex-wrap met items op calc(50% - 24px) en 12px marge —
+# de item-maat bepaalt het kolomaantal (2), niet een kaartmaat-heuristiek
+rechtsvan "kaart-twee" "kaart-een"
+onder "kaart-drie" "kaart-een"
+rechtsvan "kaart-vier" "kaart-drie"
+vlakbreedte "kaart-een" 210
+# en op desktop zegt de maat nog steeds twee-naast-elkaar
+breedte 1024
+rechtsvan "kaart-twee" "kaart-een"
+onder "kaart-drie" "kaart-een"
+vlakbreedte "kaart-een" 482
+</script>

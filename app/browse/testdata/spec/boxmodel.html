@@ -1,0 +1,27 @@
+<!doctype html>
+<html><head><style>
+.kaart { background: #eef2ff; border: 1px solid #99a; padding: 12px; margin: 16px; }
+.smal { width: 200px; margin: 0 auto; background: #ffe9e9; }
+.begrensd { max-width: 240px; background: #e9ffe9; }
+.badge { background: #cc0000; color: #ffffff; padding: 4px; }
+</style></head><body>
+<p>bovenbuur</p>
+<div class="kaart"><p>kaartinhoud</p></div>
+<div class="smal"><p>smalle strook</p></div>
+<div class="begrensd"><p>begrensde breedte</p></div>
+<p>Regel met een <span class="badge">rood label</span> erin.</p>
+</body></html>
+<script type="text/x-expect">
+# margin + border + padding: het blok springt in en krijgt een vlak
+onder "kaartinhoud" "bovenbuur"
+rand "kaartinhoud"
+achtergrond "kaartinhoud" #eef2ff
+ingesprongen "kaartinhoud"
+# width + margin:auto = het klassieke centreren
+vlakbreedte "smalle strook" 200
+vlakmidden "smalle strook"
+vlakbreedte "begrensde breedte" 240
+# een gedecoreerd inline-element wordt een eigen doosje
+achtergrond "rood label" #cc0000
+kleur "rood label" #ffffff
+</script>

@@ -1,0 +1,17 @@
+<!doctype html>
+<html><head><style>
+.rooster { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.vol { grid-column: 1 / -1; background: #ffeecc; }
+.cel { background: #e8f4e8; }
+</style></head><body>
+<div class="rooster">
+<div class="vol">kop over de volle breedte</div>
+<div class="cel">span-links</div><div class="cel">span-rechts</div>
+</div>
+</body></html>
+<script type="text/x-expect">
+# grid-column: 1 / -1 — deze cel krijgt een hele rij, de rest verdeelt zich
+vlakbreedte "kop over de volle breedte" 468
+onder "span-links" "kop over de volle breedte"
+rechtsvan "span-rechts" "span-links"
+</script>

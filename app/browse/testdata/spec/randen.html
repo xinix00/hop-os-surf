@@ -1,0 +1,24 @@
+<!doctype html>
+<html><head><style>
+.melding { border-left: 6px solid #cc0000; background: #ffeeee; }
+.tab { border-bottom: 3px solid #2244cc; }
+.dik { border: 3px solid #008000; }
+.stil { border: 2px solid transparent; background: #eef2ff; }
+</style></head><body>
+<div class="melding">let op melding</div>
+<p class="tab">tabkop</p>
+<div class="dik">dik omrand</div>
+<div class="stil">stille rand</div>
+</body></html>
+<script type="text/x-expect">
+# border-left: het accent-patroon van meldingen en citaten
+achtergrond "let op melding" #ffeeee
+streep "let op melding" #cc0000
+# border-bottom: de tab-onderstreping
+streep "tabkop" #2244cc
+# een border met dikte blijft gewoon een rand
+rand "dik omrand"
+# een transparante rand is géén rand (en zeker geen grijze lijn)
+geenrand "stille rand"
+achtergrond "stille rand" #eef2ff
+</script>

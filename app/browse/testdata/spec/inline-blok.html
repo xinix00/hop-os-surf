@@ -1,0 +1,17 @@
+<!doctype html>
+<html><head><style>
+.tegel { display: inline-block; width: 140px; background: #ddeeff; vertical-align: top; }
+</style></head><body>
+<div>
+<div class="tegel">tegel-een met tekst</div>
+<div class="tegel">tegel-twee</div>
+<div class="tegel">tegel-drie</div>
+</div>
+</body></html>
+<script type="text/x-expect">
+# display:inline-block met een breedte: mini-blokken naast elkaar in de
+# regelflow — het float:left-gevoel
+rechtsvan "tegel-twee" "tegel-een"
+rechtsvan "tegel-drie" "tegel-twee"
+vlakbreedte "tegel-een" 140
+</script>

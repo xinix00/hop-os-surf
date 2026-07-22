@@ -1,0 +1,33 @@
+<!doctype html>
+<html><head><style>
+.desktopmenu { display: none; }
+@media (min-width: 900px) {
+  .desktopmenu { display: block; }
+  .mobielmenu { display: none; }
+}
+@media (prefers-color-scheme: dark) {
+  html { background: #101018; color: #f0f0f0; }
+}
+@media (prefers-color-scheme: light) {
+  .lichtgroet { color: #008000; }
+}
+</style></head><body>
+<div class="mobielmenu">hamburgermenu</div>
+<div class="desktopmenu">volledige menubalk</div>
+<p>leesbare tekst</p>
+<p class="lichtgroet">licht bericht</p>
+</body></html>
+<script type="text/x-expect">
+# wij zijn een lichte lezer: dark-mode-CSS geldt niet (geen donker-bleed),
+# prefers-color-scheme:light wel
+licht
+kleur "leesbare tekst" #202024
+kleur "licht bericht" #008000
+# @media evalueert tegen de framebreedte: 480 is mobiel...
+zichtbaar "hamburgermenu"
+verborgen "volledige menubalk"
+# ...en op 1024 schakelt hetzelfde document naar desktop
+breedte 1024
+zichtbaar "volledige menubalk"
+verborgen "hamburgermenu"
+</script>

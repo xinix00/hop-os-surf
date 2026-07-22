@@ -1,0 +1,23 @@
+<!doctype html>
+<html><head><style>
+header { position: sticky; top: 0; background: #223355; color: #ffffff; }
+.cookie { position: fixed; bottom: 0; background: #333333; color: #ffffff; }
+.kaart { position: relative; background: #f4f4f4; }
+.etiket { position: absolute; top: 2px; left: 4px; background: #cc0000; color: #ffffff; }
+</style></head><body>
+<header>site-kop</header>
+<div class="kaart"><p>het kaartverhaal staat hier</p><span class="etiket">NIEUW</span></div>
+<p>de rest van de pagina</p>
+<div class="cookie">wij gebruiken koekjes</div>
+</body></html>
+<script type="text/x-expect">
+# sticky/fixed aan de bovenrand: de header wordt gepind
+gepind
+zichtbaar "site-kop"
+# fixed aan de onderrand is een cookiebar: die gaat weg
+verborgen "wij gebruiken koekjes"
+# absolute ankert op de relative voorouder en schildert er bovenop
+overlapt "NIEUW" "het kaartverhaal"
+bovenop "NIEUW" "het kaartverhaal"
+onder "de rest van de pagina" "het kaartverhaal"
+</script>

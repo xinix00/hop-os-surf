@@ -1,0 +1,29 @@
+<!doctype html>
+<html><head><style>
+  .blok { margin-left: 60px; background: #eef2ff; }
+  .reset { margin-left: 60px; background: #ffeedd; }
+  .reset { margin: 0; }
+  .pad { padding-left: 40px; padding-top: 24px; background: #ddeedd; }
+  .los { padding-left: 40px; }
+  .ruim { margin-top: 40px; }
+</style></head><body>
+<div class="blok">zestig links</div>
+<div class="reset">weer strak links</div>
+<div class="pad">veertig binnenruimte</div>
+<p class="los">kale padding links</p>
+<p>referentieregel</p>
+<p class="ruim">veertig erboven</p>
+</body></html>
+<script type="text/x-expect">
+# margin-left als longhand
+vlakx "zestig links" 66
+# een látere margin:0 reset de eerdere margin-left (cascade-volgorde!)
+vlakx "weer strak links" 6
+# padding-longhands op een gedecoreerd blok: vlak aan de kantlijn, tekst erin
+vlakx "veertig binnenruimte" 6
+ingesprongen "veertig binnenruimte"
+# padding-left zonder decoratie is gewoon lucht
+ingesprongen "kale padding links"
+# margin-top als longhand maakt ruimte
+ruimteonder "veertig erboven" "referentieregel" 34
+</script>

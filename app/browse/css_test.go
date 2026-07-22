@@ -24,8 +24,8 @@ func TestMediaMatches(t *testing.T) {
 		{"(width >= 40em)", false},                       // 640px
 		{"(30em <= width <= 40em)", true},                // 480 zit ertussen
 		{"(orientation: portrait)", false},               // onbekend: nee
-		{"(prefers-color-scheme: dark)", true},           // wij zijn donker
-		{"(prefers-color-scheme: light)", false},
+		{"(prefers-color-scheme: dark)", false},          // wij zijn een lichte lezer
+		{"(prefers-color-scheme: light)", true},
 		{"(prefers-reduced-motion: reduce)", true}, // en bewegen niet
 	}
 	for _, c := range cases {
@@ -53,6 +53,16 @@ func TestKleurModern(t *testing.T) {
 	}
 	if _, ok := cssColor("hsl(kapot)"); ok {
 		t.Error("kapotte hsl hoort geen kleur te zijn")
+	}
+	// Alpha 0 = volledig doorzichtig = géén kleur (nu.nl's #0000-chips
+	// werden dekkend zwart); deels doorschijnend blijft wél de kleur.
+	for _, in := range []string{"#0000", "#00000000", "rgba(0, 0, 0, 0)", "rgb(0 0 0 / 0)"} {
+		if _, ok := cssColor(in); ok {
+			t.Errorf("cssColor(%q) hoort onzichtbaar (ok=false) te zijn", in)
+		}
+	}
+	if c, ok := cssColor("rgba(10, 20, 30, 0.5)"); !ok || c != (color.RGBA{10, 20, 30, 0xFF}) {
+		t.Errorf("halfdoorzichtig hoort gewoon de kleur te zijn: %v/%v", c, ok)
 	}
 }
 

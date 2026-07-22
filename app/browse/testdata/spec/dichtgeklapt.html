@@ -1,0 +1,13 @@
+<!doctype html>
+<html><head></head><body>
+<details><summary>meer info</summary><p>het verborgen verhaal</p></details>
+<details open><summary>open info</summary><p>het zichtbare verhaal</p></details>
+</body></html>
+<script type="text/x-expect">
+# <details> zonder open toont alleen zijn samenvatting
+zichtbaar "meer info"
+verborgen "het verborgen verhaal"
+# met open staat alles er
+zichtbaar "open info"
+zichtbaar "het zichtbare verhaal"
+</script>

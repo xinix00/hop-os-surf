@@ -1,0 +1,19 @@
+<!doctype html>
+<html><head><style>
+.logo { width: 57px; height: auto; }
+.halfhoog { height: 50%; }
+.responsief { width: 50%; height: auto; }
+</style></head><body>
+<p><img class="logo" src="/pix/foto.png" width="200" height="183" alt="logo"></p>
+<p><img class="halfhoog" src="/pix/rood.png" width="64" height="48" alt="half"></p>
+<p><img class="responsief" src="/pix/foto.png" alt="vloeiend"></p>
+</body></html>
+<script type="text/x-expect">
+# het wikipedia-geval: CSS "width + height:auto" wint van de attributen —
+# de verhouding komt uit het beeld zelf (160x100 -> 57x35), geen ei
+plaatmaat 57 35
+# een hoogte-procent heeft geen basis (ouderhoogte onbekend): verhouding
+plaatmaat 64 48
+# vloeiende breedte (50% van 468) met auto-hoogte: 234x146
+plaatmaat 234 146
+</script>

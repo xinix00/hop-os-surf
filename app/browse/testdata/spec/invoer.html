@@ -1,0 +1,15 @@
+<!doctype html>
+<html><head><style>
+.zoek { width: 100%; }
+.smalveld { width: 120px; }
+</style></head><body>
+<form action="/zoek">
+<p><input class="zoek" name="q" type="search"></p>
+<p><input class="smalveld" name="kort" type="text"></p>
+</form>
+</body></html>
+<script type="text/x-expect">
+# de site-CSS bepaalt de veldbreedte: wikipedia's zoekbalk is 100%
+veldbreedte "q" 468
+veldbreedte "kort" 120
+</script>

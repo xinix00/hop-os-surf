@@ -1,0 +1,31 @@
+<!doctype html>
+<html><head><style>
+  .klein { width: 50px; height: 50px; }
+  td { background: #eeeeff; }
+</style></head><body>
+<p>vector op attribuutmaat:</p>
+<svg width="80" height="30" xmlns="http://www.w3.org/2000/svg"><rect width="80" height="30" fill="#7700cc"/></svg>
+<svg class="klein" width="200" height="100" xmlns="http://www.w3.org/2000/svg"><rect width="200" height="100" fill="#007766"/></svg>
+<img src="/pix/rood.png" width="32" height="24">
+<table width="420"><tr>
+  <td width="300">brede cel</td>
+  <td>smalle cel</td>
+</tr></table>
+<table><tr>
+  <td><svg width="40" height="40" xmlns="http://www.w3.org/2000/svg"><rect width="40" height="40" fill="#cc0077"/></svg></td>
+  <td>cel naast vector</td>
+</tr></table>
+</body></html>
+<script type="text/x-expect">
+# het width/height-attribuut is een presentational hint: gewoon CSS
+plaatmaat 80 30
+# ... waar de site-CSS dus van wint
+plaatmaat 50 50
+plaatmaat 32 24
+# <td width>: de kolombreedte van een ouderwetse tabel
+vlakbreedte "brede cel" 300
+rechtsvan "smalle cel" "brede cel"
+# een vector in een tabelcel telt als inhoud en houdt zijn maat
+plaatmaat 40 40
+zichtbaar "cel naast vector"
+</script>

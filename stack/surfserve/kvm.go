@@ -118,6 +118,8 @@ cv.addEventListener("mousedown", e => { cv.focus(); const p = pos(e); if (p) pos
 cv.addEventListener("mouseup",   e => { const p = pos(e); if (p) post({k: "btn", c: e.button, v: 0, ...p}); e.preventDefault(); });
 cv.addEventListener("contextmenu", e => e.preventDefault());
 cv.addEventListener("wheel", e => { const p = pos(e); if (p) post({k: "wheel", v: Math.sign(e.deltaY), ...p}); e.preventDefault(); });
-cv.addEventListener("keydown", e => { if (!e.repeat) post({k: "key", c: e.keyCode, v: 1}); e.preventDefault(); });
+// Repeats reizen mee als verse downs: backspace inhouden wist door, pijltjes
+// blijven scrollen — het OS bepaalt de herhaalsnelheid, wij sturen ze door.
+cv.addEventListener("keydown", e => { post({k: "key", c: e.keyCode, v: 1}); e.preventDefault(); });
 cv.addEventListener("keyup",   e => { post({k: "key", c: e.keyCode, v: 0}); e.preventDefault(); });
 </script></body></html>`

@@ -48,6 +48,9 @@ func Drive(win *window.Window, home string, logf func(string, ...any)) error {
 		go func() { navDone <- load() }()
 	}
 
+	// De echte vensterhoogte is de viewport-basis voor fixed-panelen
+	// (height: 100%-calc); bij een resize gaat hij mee.
+	viewH = win.Image().Bounds().Dy()
 	view.Page = sess.Layout(win.Image().Bounds().Dx())
 	view.Addr = sess.URL()
 	if home != "" {
@@ -71,6 +74,7 @@ func Drive(win *window.Window, home string, logf func(string, ...any)) error {
 				view.Status, view.Err = fmt.Sprintf("ok (%dms) %s", ms, sess.URL()), false
 			}
 			view.Addr = sess.URL()
+			viewH = win.Image().Bounds().Dy()
 			view.Page = sess.Layout(win.Image().Bounds().Dx())
 			redraw()
 
@@ -84,6 +88,7 @@ func Drive(win *window.Window, home string, logf func(string, ...any)) error {
 				// mogelijk staan (ScrollBy(0) klemt hem op de nieuwe hoogte).
 				// Tijdens een navigatie niet layouten (sess is van de worker).
 				if !navBusy {
+					viewH = int(ev.Y)
 					view.Page = sess.Layout(int(ev.X))
 				}
 				view.ScrollBy(0, int(ev.Y))
@@ -96,6 +101,12 @@ func Drive(win *window.Window, home string, logf func(string, ...any)) error {
 				}
 
 			case ev.Kind == surf.InputButton && ev.Value == 1:
+				// Terug: de knop in de adresbalk, of de terug-duimknop op
+				// de muis (button 3 reist gewoon mee door de KVM).
+				if ev.Code == 3 || view.HitBack(int(ev.X), int(ev.Y)) {
+					startNav("terug", sess.Back)
+					continue
+				}
 				_, h := win.Size()
 				// Velden eerst: een knop verstuurt het formulier, een
 				// tekstveld pakt de focus (en daarmee de toetsen).

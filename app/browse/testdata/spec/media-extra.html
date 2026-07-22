@@ -1,0 +1,15 @@
+<!doctype html>
+<html><head></head><body>
+<p><video poster="/pix/foto.png" width="120">valt terug op tekst</video></p>
+<p><img src="/pix/rood.png" style="display: block; margin: 0 auto" alt="midden"></p>
+<p>een koppel&shy;teken verdwijnt netjes</p>
+</body></html>
+<script type="text/x-expect">
+# een video toont zijn poster (width-attribuut 120, 160x100 -> 75 hoog)
+plaatmaat 120 75
+verborgen "valt terug op tekst"
+# margin: 0 auto centreert het blok-plaatje
+plaatmidden 64 48
+# het zachte koppelteken (&shy;) is onzichtbaar
+zichtbaar "koppelteken verdwijnt"
+</script>

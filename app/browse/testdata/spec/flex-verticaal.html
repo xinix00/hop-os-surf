@@ -1,0 +1,26 @@
+<!doctype html>
+<html><head><style>
+.rij { display: flex; flex-direction: row; align-items: center; }
+.kaart { background: #eeeeee; border: 1px solid #999999; }
+.hoog { min-height: 100px; }
+.zelf { align-self: flex-end; }
+.balk { display: flex; align-items: center; background: #223355; color: #ffffff; }
+.knop { background: #cc7700; padding: 12px; }
+</style></head><body>
+<div class="rij">
+  <div class="kaart hoog">hoge kaart</div>
+  <div class="kaart">middenkaart</div>
+  <div class="kaart zelf">onderkaart</div>
+</div>
+<div class="balk"><span class="knop">hoge knop</span><span>lijntekst er naast</span></div>
+</body></html>
+<script type="text/x-expect">
+# de hoogste cel bepaalt de rij; align-items: center centreert de rest verticaal
+vmidden "middenkaart" "hoge kaart"
+# align-self wint van align-items: dit item hangt aan de onderkant
+onderlijn "onderkaart" "hoge kaart"
+# het gethop-geval: een grotere knop laat de balk meegroeien...
+omvat "lijntekst er naast" "hoge knop"
+# ...en de tekst ernaast centreert verticaal op de knop
+vmidden "lijntekst er naast" "hoge knop"
+</script>

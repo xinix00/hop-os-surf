@@ -1,0 +1,30 @@
+<!doctype html>
+<html><head><style>
+header { display: flex; }
+nav { margin-left: auto; }
+.rij { display: flex; flex-direction: row; }
+.kaart { background: #eeeeee; border: 1px solid #999999; }
+.wikkel { display: flex; flex-wrap: wrap; }
+.kolom { display: flex; flex-direction: column; }
+.om { display: flex; flex-direction: column-reverse; }
+</style></head><body>
+<header><span>merknaam</span><nav>menuknop</nav></header>
+<div class="rij"><div class="kaart">kort stukje</div><div class="kaart">deze kaart bevat een flink langer verhaal zodat hij hoger uitvalt dan zijn buurman</div></div>
+<div class="wikkel"><div>wik1</div><div>wik2</div><div>wik3</div><div>wik4</div><div>wik5</div><div>wik6</div></div>
+<div class="kolom"><span>kol-eerst</span><span>kol-daarna</span></div>
+<div class="om"><span>om-onder</span><span>om-boven</span></div>
+</body></html>
+<script type="text/x-expect">
+# margin-left:auto absorbeert de vrije ruimte: het item schuift naar rechts
+rechtsvan "menuknop" "merknaam"
+rechterrand "menuknop"
+# expliciete rij: cellen naast elkaar, vlakken even hoog (align-items: stretch)
+rechtsvan "deze kaart" "kort stukje"
+evenhoog "kort stukje" "deze kaart"
+# flex-wrap: cellen in rijen gehakt
+rechtsvan "wik2" "wik1"
+onder "wik3" "wik1"
+# kolom stapelt (en reset de inline-context), reverse draait om
+onder "kol-daarna" "kol-eerst"
+onder "om-onder" "om-boven"
+</script>
