@@ -72,6 +72,12 @@ De websites zijn daarna de uitkomstmeting, niet het doel.
 | het HTML-strootje | de UA-sheet dekt `blockquote` (inspringing + balkje), `s`/`del` (line-through — de oude prijs!), `ins`/`u`, `sub`/`sup` (klein + offset onder/boven de regel), `dl`/`dd`, `kbd` (toets-chip); alleen het middenstreepje en de offset waren engine-werk | `ua-elementen` |
 | tabel-rowspan | een `rowspan` bezet zijn kolom ook in de rijen eronder: de cel staat één keer, de kolommen eronder blijven leeg maar de uitlijning klopt | `rijspan` |
 | celmidden + lagen | `vertical-align: top/middle/bottom` is de tabel-taal voor align-items — per cel vertaald; `z-index` sorteert de late (absolute) schilderlaag stabiel, dus gelijke z blijft bronvolgorde | `celmidden-lagen` |
+| progressiebalkjes | het gethop-patroon: een leeg blok mét gedeclareerde hoogte houdt zijn vlak (het spoor), en een leeg absoluut element met vlak, width-% en inset-ankers rendert als vlak op maat van zijn relative ouder (de vulling) — fillAbs laat lege elementen door (een leeg element is geen fotolijst-vulling), en de containing block ligt exact op het vlak | `voortgang` |
+| scrollen zonder hertekenen | de layout wás al gecached; RenderScrolled hergebruikt ook de píxels: het overlevende deel van het frame schuift in het buffer zelf (memmove), alleen de blootgelegde strook wordt getekend (geclipt via SubImage) en de damage naar de compositor is het contentgebied — geen byte extra opslag; pin-overgangen en buffer/pagina-wissels vallen terug op een volle Render | `TestRenderScrolled` (bit-identiek aan een volle render, álle fixtures × deltas heen en terug) |
+| geen synthetische marges | subs (cellen, blok-in-blok) rekenen zónder onze paginamarge: de celbreedte ís de contentbreedte — voorheen verdween er 12px per nestingniveau (tweakers' hero: 704 → 599); de paginamarge (6px, het body-margin-gevoel) blijft alleen op de wortel | `doosmaat`, `beeld-vol` |
+| fixed = (0,0) | een gepinde fixed top:0-balk begint óp de hoek: rand tot rand (geen paginamarge), geen blokmarge, en hij ontsnapt aan zijn wrapper zolang er geen echte inhoud boven staat | `tweakers-kop` (`volbreed`, `bovenrand`) |
+| beeld op 100% | `width: 100%` betekent ook uitrekken bóven de natuurlijke maat, en de teaser-float (thumbnail links, tekst ernaast) geldt alleen als het beeld hoogstens de halve regel vraagt — een vol beeld ís de inhoud | `beeld-vol` |
+| grid-areas volledig | de areas-template is heilig: een gat ("." of slot zonder element) is een lege cel, een rowspan-naam houdt zijn kolom bezet (inhoud staat één keer), auto-geplaatste kinderen komen in impliciete rijen over dezelfde tracks, en de balans-heuristiek blijft van expliciete templates af — tweakers' "editorial-content editorial-content sidebar" rendert mét zijkolom | `grid-areas-vol` |
 
 ## 2. Zo tonen we aan dat het klopt
 
@@ -118,7 +124,7 @@ ze — zie de laatste vijf rijen van §1). Wat er nog open staat:
 | # | gat | wat er mist | waar je het ziet |
 |---|---|---|---|
 | 1 | data:-URI's | `background-image: url(data:image/svg+xml...)` en `<img src="data:...">` decoderen | logo's en iconen overal |
-| 2 | grid-rijspans | `grid-row: span N` en areas mét rowspan (de hoge zijbalk) — valt nu eerlijk terug op stapelen | voorpagina's |
+| 2 | grid-rijspans | areas mét rowspan is gedicht (23-07, `grid-areas-vol`); alleen de `grid-row: span N`-property zelf ontbreekt nog | voorpagina's |
 | 3 | interactietrack | POST-formulieren, checkbox/radio, `<select>` | zoeken, inloggen |
 | 4 | glyphs | ASCII-dekking van het font (→ transliteratie-tabel) | namen, koersen |
 

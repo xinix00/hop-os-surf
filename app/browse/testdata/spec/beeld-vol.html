@@ -1,0 +1,19 @@
+<!doctype html>
+<html><head><style>
+  .held img { width: 100%; height: auto }
+  .rij { display: grid; grid-template-columns: 1fr 1fr; gap: 8px }
+</style></head><body>
+<div class="held"><img src="/pix/rood.png" alt="held"></div>
+<div class="rij">
+  <div class="held"><img src="/pix/rood.png" alt="linksvol"></div>
+  <div>rechtscel met tekst</div>
+</div>
+</body></html>
+<script type="text/x-expect">
+# width:100% betekent ook UITREKKEN: de 64x48-bron wordt de volle
+# regelbreedte (468), proportioneel mee omhoog
+plaatmaat 468 351
+# en in een gridcel is 100% de celbreedte - geen synthetische marges
+# die er per nestingniveau 12px afsnoepen
+plaatmaat 230 172
+</script>

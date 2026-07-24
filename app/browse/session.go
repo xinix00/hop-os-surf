@@ -490,15 +490,12 @@ func ancestorForm(n *html.Node) *html.Node {
 
 // --- CSS laden en matchen -----------------------------------------------------
 
-// Grenzen (zelfde gedachte als bij de afbeeldingen: bare metal, begrensde
-// heap en begrensde tijd).
-const (
-	cssMaxSheets  = 12        // externe stylesheets per pagina (tweakers: 11, de header-regel zit in #8)
-	cssMaxImports = 8         // @import-sheets bovenop de links (elke import is een fetch)
-	cssMaxBytes   = 256 << 10 // per sheet, over de lijn
-	cssMaxRules  = 10240     // na filtering; media reist mee, dus mobiel+desktop samen — krap cappen kost juist de mobiele overrides
-	cssBudget    = 5 * time.Second
-)
+// Géén inhouds-limieten meer op CSS (Derek 23-07: elke cap kostte stilletjes
+// de helft van een echte site — eerst de header-regel in sheet #8, toen de
+// mobiele overrides achter de rules-cap, toen de match-deadline halverwege).
+// Wat blijft is één anti-oneindige-stream-slot per fetch; de nettimeout
+// (netClient, 20s) begrenst de tijd.
+const cssMaxBytes = 8 << 20 // per sheet over de lijn — ver boven elke echte sheet
 
 // loadStyles verzamelt de <style>-blokken en <link rel=stylesheet>-sheets,
 // parset ze tot regels en matcht elke regel één keer met cascadia over de
@@ -538,7 +535,7 @@ func (s *Session) loadStyles() {
 		case "link":
 			rel, _ := attr(n, "rel")
 			href, _ := attr(n, "href")
-			if strings.EqualFold(strings.TrimSpace(rel), "stylesheet") && href != "" && links < cssMaxSheets {
+			if strings.EqualFold(strings.TrimSpace(rel), "stylesheet") && href != "" {
 				if mq, ok := sheetMQ(n); ok {
 					links++
 					bronnen = append(bronnen, &bron{href: href, mq: mq})
@@ -561,7 +558,6 @@ func (s *Session) loadStyles() {
 		}(b)
 	}
 	wg.Wait()
-	importBudget := cssMaxImports
 	for _, b := range bronnen {
 		// @import: sheets die sheets laden — relatieve verwijzingen resolven
 		// tegen de importerende sheet, niet tegen de pagina.
@@ -571,11 +567,8 @@ func (s *Session) loadStyles() {
 				base = u
 			}
 		}
-		b.tekst = s.expandImports(b.tekst, base, &importBudget, 0)
+		b.tekst = s.expandImports(b.tekst, base, 0)
 		rules = append(rules, parseCSSm(b.tekst, len(rules), b.mq)...)
-	}
-	if len(rules) > cssMaxRules {
-		rules = rules[:cssMaxRules]
 	}
 	if len(rules) == 0 {
 		return
@@ -586,11 +579,7 @@ func (s *Session) loadStyles() {
 		}
 		return rules[i].seq < rules[j].seq
 	})
-	deadline := time.Now().Add(cssBudget)
 	for _, r := range rules {
-		if time.Now().After(deadline) {
-			break // liever een half gestylede pagina dan een hangende browser
-		}
 		sel, err := cascadia.Parse(r.sel)
 		if err != nil {
 			continue // selector die cascadia niet kent: regel vervalt
@@ -700,9 +689,9 @@ func (s *Session) stylesFor(width int) map[*html.Node]props {
 // simpelweg niet en blijft de pagina half ongestyled. Een mediaconditie
 // op de import wordt een omhullend @media-blok (dezelfde evaluatie als
 // elke andere query), een supports(...)-conditie evalueert tegen
-// supportedProp. budget en depth begrenzen het fetchen (import-cycli!).
-func (s *Session) expandImports(css string, base *url.URL, budget *int, depth int) string {
-	if depth >= 3 || !strings.Contains(css, "@import") {
+// supportedProp. depth is de cyclus-wacht (import-lussen), geen budget.
+func (s *Session) expandImports(css string, base *url.URL, depth int) string {
+	if depth >= 6 || !strings.Contains(css, "@import") {
 		return css
 	}
 	css = stripComments(css)
@@ -723,7 +712,7 @@ func (s *Session) expandImports(css string, base *url.URL, budget *int, depth in
 		stmt := css[j+len("@import") : j+end]
 		i = j + end + 1
 		ref, mq, ok := importTarget(stmt)
-		if !ok || ref == "" || strings.HasPrefix(ref, "data:") || *budget <= 0 || base == nil {
+		if !ok || ref == "" || strings.HasPrefix(ref, "data:") || base == nil {
 			continue
 		}
 		if mq != "" && !mediaAnyWidth(mq) {
@@ -733,8 +722,7 @@ func (s *Session) expandImports(css string, base *url.URL, budget *int, depth in
 		if err != nil {
 			continue
 		}
-		*budget--
-		sub := s.expandImports(s.fetchText(u.String()), u, budget, depth+1)
+		sub := s.expandImports(s.fetchText(u.String()), u, depth+1)
 		if mq != "" {
 			sub = "@media " + mq + "{" + sub + "}"
 		}
@@ -817,10 +805,10 @@ func (s *Session) fetchText(href string) string {
 // --- afbeeldingen -------------------------------------------------------------
 
 // Grenzen voor het afbeeldingen laden: dit draait straks op bare metal, en
-// een pagina vol foto's mag de heap niet opblazen. Boven de kaders → alt-
-// tekst, net als bij een laadfout.
+// één foto mag de heap niet opblazen. Boven de kaders → alt-tekst, net als
+// bij een laadfout. De kaders zijn per afbeelding — een paginateller was
+// er ook, maar een krant tóónt gewoon 80 foto's (weg dus, Derek 22-07).
 const (
-	imgMaxCount = 32      // per pagina
 	imgMaxBytes = 8 << 20 // per afbeelding, over de lijn (easyflorist: 4,8MB-webp's)
 	imgMaxDim   = 2048    // px, per zijde — wat we bewáren (2048² RGBA = 16MB)
 	// De decode-piek die we aandurven: sites serveren rustig 24-megapixel
@@ -839,7 +827,7 @@ func (s *Session) loadImages() {
 	seen := map[string]bool{}
 	var srcs []string
 	load := func(src string) {
-		if src == "" || seen[src] || len(seen) >= imgMaxCount {
+		if src == "" || seen[src] {
 			return
 		}
 		seen[src] = true

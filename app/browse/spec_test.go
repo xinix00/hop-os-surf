@@ -92,6 +92,44 @@ func TestSpec(t *testing.T) {
 	t.Logf("%d fixtures -> %s", len(cellen), out)
 }
 
+// TestRenderScrolled bewijst het scroll-pad: verschuiven-in-het-buffer
+// plus de blootgelegde strook (RenderScrolled) moet bit-identiek zijn aan
+// een verse volle Render op dezelfde scrollpositie — voor élke fixture
+// (donkere canvassen, gepinde headers) en een reeks deltas, heen en terug.
+func TestRenderScrolled(t *testing.T) {
+	files, err := filepath.Glob(filepath.Join("testdata", "spec", "*.html"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("geen spec-fixtures: %v", err)
+	}
+	for _, f := range files {
+		naam := filepath.Base(f)
+		s := NewSessionHandler(specMux())
+		if err := s.Go("spec.local/" + naam); err != nil {
+			t.Fatalf("%s: %v", naam, err)
+		}
+		vFast := View{Addr: s.URL(), Page: s.Layout(specW)}
+		vRef := View{Addr: vFast.Addr, Page: vFast.Page}
+		if vFast.Page.Height <= specH-BarH-StatusH {
+			continue // niets te scrollen
+		}
+		img := image.NewRGBA(image.Rect(0, 0, specW, specH))
+		ref := image.NewRGBA(image.Rect(0, 0, specW, specH))
+		vFast.Render(img)
+		for _, d := range []int{24, 24, -24, 120, -300, 24, 1 << 20, -48, -(1 << 20)} {
+			if !vFast.ScrollBy(d, specH) {
+				continue
+			}
+			vFast.RenderScrolled(img)
+			vRef.Scroll = vFast.Scroll
+			vRef.Render(ref)
+			if !bytes.Equal(img.Pix, ref.Pix) {
+				t.Errorf("%s: scroll %d (delta %d): pixels wijken af van een volle render", naam, vFast.Scroll, d)
+				break
+			}
+		}
+	}
+}
+
 // specMux serveert de fixtures plus een paar gegenereerde plaatjes —
 // alles lokaal, dus de poort blijft zonder netwerk groen.
 func specMux() http.Handler {
@@ -787,6 +825,25 @@ func specCheck(p Page, w int, toks []string) error {
 		u := a.R.Union(b.R)
 		if mid := (u.Min.X + u.Max.X) / 2; absInt(mid-w/2) > 12 {
 			return fmt.Errorf("paar-midden op x=%d, paginamidden is %d", mid, w/2)
+		}
+	case "volbreed":
+		// het vlak onder de tekst raakt beide vensterranden exact —
+		// de fixed rand-tot-rand-balk (geen paginamarge)
+		v, err := vlak(1)
+		if err != nil {
+			return err
+		}
+		if v.R.Min.X > 0 || v.R.Max.X < w {
+			return fmt.Errorf("vlak %v raakt de randen niet (venster %d breed)", v.R, w)
+		}
+	case "bovenrand":
+		// het vlak begint op de bovenrand van de pagina (y 0)
+		v, err := vlak(1)
+		if err != nil {
+			return err
+		}
+		if v.R.Min.Y > 1 {
+			return fmt.Errorf("vlak begint op y=%d, hoort 0", v.R.Min.Y)
 		}
 	case "vlaklinks":
 		v, err := vlak(1)

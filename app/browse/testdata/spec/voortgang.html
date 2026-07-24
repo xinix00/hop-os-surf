@@ -1,0 +1,24 @@
+<!doctype html>
+<html><head><style>
+  * { box-sizing: border-box }
+  :root { --panel: #10161d; --acc: var(--koper); --koper: #c47a3c; --acc-dim: #7a4e28 }
+  body { background: #0b0f14; color: #e8e4da }
+  .rung { display: grid; grid-template-columns: 150px 1fr 80px; gap: 16px; align-items: center }
+  .rung .bar { height: 10px; border-radius: 2px; background: var(--panel); position: relative; overflow: hidden }
+  .rung .bar i { position: absolute; inset: 0 auto 0 0; background: var(--acc-dim); border-radius: 2px }
+  .rung:first-child .bar i { background: var(--acc) }
+  .rung .n { text-align: right }
+</style></head><body>
+<div class="rung"><span class="lbl">agent en api</span><span class="bar"><i style="width:100%"></i></span><span class="n">100%</span></div>
+<div class="rung"><span class="lbl">runners exec</span><span class="bar"><i style="width:72%"></i></span><span class="n">72%</span></div>
+<div class="rung"><span class="lbl">planwerk</span><span class="bar"><i style="width:25%"></i></span><span class="n">25%</span></div>
+</body></html>
+<script type="text/x-expect">
+# het gethop-patroon: een leeg spoor-blok met hoogte (het vlak blijft!)
+# en een lege absolute vulling met width-percentage tegen de relative
+# ouder - drie sporen, drie vullingen op hun eigen breedte
+vlakjes 3 206 10 #10161d
+vlakjes 1 206 10 #c47a3c
+vlakjes 1 148 10 #7a4e28
+vlakjes 1 51 10 #7a4e28
+</script>

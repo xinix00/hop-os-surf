@@ -1,0 +1,58 @@
+<!doctype html>
+<html><head><style>
+  /* tweakers' voorpagina-mechaniek, integraal: benoemde gebieden op het
+     buitenrooster (redactie 3 sporen breed, plank 1), display:contents-
+     wrappers die hun kinderen het rooster in hijsen, en numerieke
+     grid-area's (rijregels) in het binnenrooster — teaser boven de
+     nieuwslijst, allebei vol in hun gebied. */
+  .fp { display: grid; gap: 8px;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-areas:
+      "category-bar category-bar category-bar category-bar"
+      "editorial-content editorial-content editorial-content sidebar"
+      "community community community community"; }
+  .category-bar { grid-area: category-bar; background: #e8ecf2; }
+  .editorial-content { grid-area: editorial-content; display: grid; gap: 8px; }
+  .editorial-content .ankeiler-1 { grid-area: 1; }
+  .editorial-content .headlines { grid-area: 2; }
+  .ankeiler-stream { display: contents; }
+  .headline-block-1 { display: contents; }
+  twk-ankeiler { grid-area: unset; }
+  .ankeiler-1 { background: #dfe7f2; }
+  .headlines { background: #f4f6fa; }
+  .sidebar { grid-area: sidebar; background: #eef0f4; }
+  .community { grid-area: community; background: #e2e6ee; }
+</style></head><body>
+<div class="fp">
+  <nav class="category-bar">categoriebalk met linkjes</nav>
+  <div class="editorial-content">
+    <div class="ankeiler-stream">
+      <twk-ankeiler class="ankeiler-1"><div>grote teaser met video</div></twk-ankeiler>
+    </div>
+    <div class="headline-block-1">
+      <div class="headlines">
+        <h2>Laatste nieuws</h2>
+        <p>eerste nieuwsregel over glasvezel</p>
+        <p>tweede nieuwsregel over downloads</p>
+      </div>
+    </div>
+  </div>
+  <div class="sidebar">plank met guides</div>
+  <div class="community">communityblok onderaan</div>
+</div>
+</body></html>
+<script type="text/x-expect">
+breedte 1280
+# buitenrooster: de balk vol breed, redactie 3 sporen, plank 1 spoor rechts
+vlaklinks "categoriebalk met linkjes"
+vlakrechts "categoriebalk met linkjes"
+rechtsvan "plank met guides" "grote teaser"
+bredervlak "Laatste nieuws" "plank met guides"
+# binnenrooster (numerieke rijen, door de contents-wrappers heen):
+# teaser rij 1, de nieuwslijst rij 2 — tussendoor dus, niet ernaast
+onder "Laatste nieuws" "grote teaser"
+# de voet over de volle breedte, onder alles
+onder "communityblok onderaan" "Laatste nieuws"
+vlaklinks "communityblok onderaan"
+vlakrechts "communityblok onderaan"
+</script>

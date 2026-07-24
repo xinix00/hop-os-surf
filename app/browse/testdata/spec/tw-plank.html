@@ -1,0 +1,63 @@
+<!doctype html>
+<html><head><style>
+  /* tweakers' Best Buy Guides-plank, integraal: een <ul> als grid met
+     repeat(var(--list-columns, 2), 1fr)-sporen en regelnamen, een losse <p>
+     en absolute overlay-<ul>'s tussen de items — die zijn géén cellen. */
+  .sidebar { width: 300px; }
+  twk-best-buy-guide-block .bbg-list { position: relative; display: grid;
+    grid-template-rows: [content-start] 1fr [content-end];
+    grid-template-columns: [content-start] repeat(var(--list-columns, 2), 1fr) [content-end];
+    gap: 0.5rem; padding-left: 0; margin: 0; }
+  twk-best-buy-guide-block .bbg-list { --list-columns: 2; }
+  twk-best-buy-guide-block .bbg-item { list-style: none;
+    background-color: #f0f2f6; border-radius: 4px; }
+  twk-best-buy-guide-block .bbg-item > a { display: flex; flex-direction: column;
+    gap: 0; align-items: center; justify-content: space-between;
+    padding: .75rem 0.5rem 1.25rem .5rem; }
+  twk-best-buy-guide-block .bbg-item-articles { position: absolute; inset: 0;
+    display: flex; flex-direction: column; gap: 1rem; padding: 1rem; margin: 0;
+    list-style: none; background-color: #ffffff; }
+  twk-best-buy-guide-block .bbg-item-articles:not(.open) { display: none; }
+</style></head><body>
+<div class="sidebar">
+<twk-best-buy-guide-block>
+  <div class="bbg-heading">
+    <h2><a href="#">Best Buy Guides</a></h2>
+    <p>De beste koop volgens de redactie</p>
+  </div>
+  <ul class="bbg-list">
+    <li class="bbg-item" data-target="12"><a href="#">
+      <div class="bbg-item-heading">Beste smartphones</div>
+      <p class="bbg-item-count">5 guides</p>
+    </a></li>
+    <ul class="bbg-item-articles" data-target="12">
+      <p>Beste smartphones:</p>
+      <li><a href="#">overlay die dicht hoort</a></li>
+    </ul>
+    <li class="bbg-item" data-target="13"><a href="#">
+      <div class="bbg-item-heading">Beste laptops</div>
+      <p class="bbg-item-count">5 guides</p>
+    </a></li>
+    <ul class="bbg-item-articles" data-target="13">
+      <p>Beste laptops:</p>
+      <li><a href="#">tweede overlay</a></li>
+    </ul>
+    <li class="bbg-item" data-target="14"><a href="#">
+      <div class="bbg-item-heading">Beste desktops</div>
+      <p class="bbg-item-count">7 guides</p>
+    </a></li>
+  </ul>
+</twk-best-buy-guide-block>
+</div>
+</body></html>
+<script type="text/x-expect">
+# twee kaarten per rij (repeat(var(--list-columns, 2), 1fr) in een 300px-plank)
+rechtsvan "Beste laptops" "Beste smartphones"
+onder "Beste desktops" "Beste smartphones"
+evenhoog "Beste smartphones" "Beste laptops"
+# de dichte overlays zijn geen cellen en niet te zien
+verborgen "overlay die dicht hoort"
+verborgen "tweede overlay"
+# een kaart is smaller dan de halve plank plus marge — geen volle breedte
+vlakbreedte "5 guides" 146
+</script>

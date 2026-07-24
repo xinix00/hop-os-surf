@@ -77,8 +77,10 @@ breedte 1280
 # de balk pint en beslaat de VOLLE breedte — hij is fixed tegen de
 # viewport, ook al staat hij in de gecentreerde pagina-rail
 gepind
-vlaklinks "Nieuws"
-vlakrechts "Nieuws"
+# rand tot rand en óp de bovenrand: top:0/left:0 is exact (0,0), geen
+# paginamarge en geen synthetische blokmarge
+volbreed "Nieuws"
+bovenrand "Nieuws"
 # alles op één regel: het menu naast elkaar, het gebruikersmenu rechts
 rechtsvan "Reviews" "Nieuws"
 rechtsvan "Pricewatch" "Best Buy Guides"
@@ -92,8 +94,8 @@ verborgen "Smartphones"
 verborgen "Tweakers"
 # het logo: het externe sprite-symbool vult zijn flex-baan (156 minus de
 # randen), balkhoog — wit op de merkkleur
-plaatmaat 132 48
-plaatpunt 132 48 20 24 #ffffff
+plaatmaat 144 48
+plaatpunt 144 48 20 24 #ffffff
 # en de pagina zelf begint gewoon bovenaan
 onder "de voorpagina begint hier" "Nieuws"
 </script>

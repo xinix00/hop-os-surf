@@ -1,3 +1,4 @@
 out/
 *.elf
 *.elf.gz
+.DS_Store

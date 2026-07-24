@@ -1,0 +1,42 @@
+<!doctype html>
+<html><head><style>
+  .vel { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px;
+         grid-template-areas: "kop kop kop" "hoofd hoofd zij" "onder onder zij" ". extra extra" }
+  .kop { grid-area: kop; background-color: #a11236; color: #ffffff }
+  .hoofd { grid-area: hoofd }
+  .zij { grid-area: zij; background-color: #eef2f8 }
+  .onder { grid-area: onder }
+  .extra { grid-area: extra }
+  .vulling { min-height: 560px; background-color: #ffe08a }
+  .hoofd img { width: 100% }
+</style></head><body>
+<div class="vel">
+  <div class="kop">kopbalk</div>
+  <div class="hoofd"><p>hoofdkop</p><img src="/pix/rood.png" alt="hoofdfoto"><div class="vulling">hoofdverhaal</div></div>
+  <div class="zij">zijkolom</div>
+  <div class="onder">onderbalk</div>
+  <div class="extra">extrabalk</div>
+  <div>losse een</div>
+  <div>losse twee</div>
+  <div>losse drie</div>
+  <div>losse vier</div>
+</div>
+</body></html>
+<script type="text/x-expect">
+# het tweakers-patroon: "hoofd hoofd zij" - de zijkolom staat NAAST het
+# hoge hoofdverhaal (de template is expliciet: geen balans-stapeling)
+rechtsvan zijkolom hoofdkop
+# width:100% in de hoofd-cel: 2 sporen + gap = 308, proportioneel omhoog
+plaatmaat 308 231
+# rowspan: zij bezet zijn kolom ook in rij 3 - onder (2 sporen) lijnt
+# gewoon uit met hoofd, en zij staat er maar een keer
+zelfdekolom onderbalk hoofdverhaal
+# een gat (".") laat zijn kolom open: extra begint op spoor 2
+ingesprongen extrabalk
+# auto-geplaatste kinderen: impliciete rijen over dezelfde sporen
+rechtsvan "losse twee" "losse een"
+rechtsvan "losse drie" "losse twee"
+onder "losse vier" "losse een"
+zelfdekolom "losse vier" "losse een"
+onder "losse een" onderbalk
+</script>

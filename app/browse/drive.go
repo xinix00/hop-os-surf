@@ -2,6 +2,7 @@ package browse
 
 import (
 	"fmt"
+	"image"
 	"time"
 
 	"github.com/xinix00/hop-os-surf/stack/surf"
@@ -22,6 +23,17 @@ func Drive(win *window.Window, home string, logf func(string, ...any)) error {
 		img := win.Image() // elke frame opvragen: na een resize is hij nieuw
 		view.Render(img)
 		if err := win.Present(); err != nil {
+			presentErr = err
+		}
+	}
+	// Alleen gescrold: de pixels schuiven in het buffer en enkel de
+	// blootgelegde strook wordt getekend (RenderScrolled); de balken
+	// veranderen niet, dus de damage is het contentgebied.
+	redrawScroll := func() {
+		img := win.Image()
+		view.RenderScrolled(img)
+		b := img.Bounds()
+		if err := win.Present(image.Rect(b.Min.X, b.Min.Y+BarH, b.Max.X, b.Max.Y-StatusH)); err != nil {
 			presentErr = err
 		}
 	}
@@ -97,7 +109,7 @@ func Drive(win *window.Window, home string, logf func(string, ...any)) error {
 			case ev.Kind == surf.InputWheel:
 				_, h := win.Size()
 				if view.ScrollBy(int(ev.Value)*24, h) {
-					redraw()
+					redrawScroll()
 				}
 
 			case ev.Kind == surf.InputButton && ev.Value == 1:
@@ -193,7 +205,7 @@ func Drive(win *window.Window, home string, logf func(string, ...any)) error {
 						d = view.Page.Height
 					}
 					if view.ScrollBy(d, h) {
-						redraw()
+						redrawScroll()
 					}
 				default:
 					if r := Rune(ev.Code, shift); r != 0 {
